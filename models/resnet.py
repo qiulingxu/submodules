@@ -9,6 +9,7 @@ Reference:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from cl import ClassificationMask as CM
 
 
 class BasicBlock(nn.Module):
@@ -70,6 +71,7 @@ class Bottleneck(nn.Module):
         return out
 
 
+
 class ResNet(nn.Module):
     def __init__(self, block, num_blocks, num_classes=10):
         super(ResNet, self).__init__()
@@ -102,30 +104,30 @@ class ResNet(nn.Module):
         out = out.view(out.size(0), -1)
         out = self.linear(out)
         return out
-
+CResNet = CM(ResNet)
 
 def ResNet18():
-    return ResNet(BasicBlock, [2, 2, 2, 2])
+    return CResNet(BasicBlock, [2, 2, 2, 2])
 
 
 def ResNet34():
-    return ResNet(BasicBlock, [3, 4, 6, 3])
+    return CResNet(BasicBlock, [3, 4, 6, 3])
 
 
 def ResNet50():
-    return ResNet(Bottleneck, [3, 4, 6, 3])
+    return CResNet(Bottleneck, [3, 4, 6, 3])
 
 
 def ResNet101():
-    return ResNet(Bottleneck, [3, 4, 23, 3])
+    return CResNet(Bottleneck, [3, 4, 23, 3])
 
 
 def ResNet152():
-    return ResNet(Bottleneck, [3, 8, 36, 3])
+    return CResNet(Bottleneck, [3, 8, 36, 3])
 
 
 def test():
-    net = ResNet18()
+    net = CResNet()
     y = net(torch.randn(1, 3, 32, 32))
     print(y.size())
 
