@@ -21,6 +21,7 @@ from cl import EvalProgressPerSampleClassification as EPSP, \
 from cl.configs.imageclass_config import incremental_config
 from cl.utils import get_config, save_config, set_config
 from cl.algo import knowledge_distill_loss, EWC
+import cl
 from functools import partial
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
@@ -51,13 +52,17 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
+if args.dataset == "cifar10":
+    ds = torchvision.datasets.CIFAR10
+elif args.dataset == "cifar100":
+    ds = torchvision.datasets.CIFAR100
 
-trainset = torchvision.datasets.CIFAR10(
+trainset = ds(
     root='./data', train=True, download=True, transform=transform_train)
 trainloader = torch.utils.data.DataLoader(
     trainset, batch_size=128, shuffle=True, num_workers=8)
 
-testset = torchvision.datasets.CIFAR10(
+testset = ds(
     root='./data', train=False, download=True, transform=transform_test)
 testloader = torch.utils.data.DataLoader(
     testset, batch_size=100, shuffle=False, num_workers=8)
@@ -68,9 +73,16 @@ testloader = torch.utils.data.DataLoader(
 # configure the max step
 lwf = args.lwf
 ewc = args.ewc
+method_name = ""
+if lwf:
+    method_name += "#lwf"
+if ewc:
+    method_name += "#ewc"
+if method_name == "":
+    method_name = "#vanilla"
 set_config("develop_assumption", args.dev_scene)
 set_config("classification_task", "domain_inc")
-config = incremental_config(args.dataset)
+setting = incremental_config(args.dataset)
 
 # Model
 print('==> Building model..')
@@ -110,10 +122,10 @@ optimizer = optim.SGD(net.parameters(), lr=args.lr,
 
 class ImageClassTraining(VT):
 
-    def _model_process(self, model: nn.Module, key, step):
+    def _model_process(self, task_name, model: nn.Module, key, step):
         if step == 0:
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
-    
+        return model
     def pre_train(self):
         self.ewcs = {}
 
@@ -127,7 +139,7 @@ class ImageClassTraining(VT):
             self.ewcs[self.curr_order] = _ewc
 
 
-    def _train(self, omodel, dataloader, prev_models, device, epoch):
+    def _train_single(self, omodel, dataloader, prev_models, device, epoch):
         print('\nEpoch: %d' % epoch)
         model = torch.nn.DataParallel(omodel)
         train_loss = 0
@@ -135,7 +147,7 @@ class ImageClassTraining(VT):
         total = 0
         compare_pairs = []         
         for compare_pair in self.taskdata.comparison:   
-            if compare_pair[-1] == self.current_k:
+            if compare_pair[-1] == self.curr_order:
                 compare_pairs.append(compare_pair[0])             
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             #print(inputs.shape, targets.shape)
@@ -144,13 +156,14 @@ class ImageClassTraining(VT):
             outputs = model(inputs)
             loss = criterion(outputs, targets)
             loss_penalty = 0
-            for k in compare_pairs:
-                if lwf and len(prev_models)>0:
-                    klg_loss = knowledge_distill_loss(model, prev_models[k],)
-                    loss_penalty += klg_loss
-                if ewc and len(prev_models)>0:
-                    loss_penalty += self.ewcs[k].penalty(model)
-            loss_penalty /= len(compare_pairs)
+            if len(compare_pairs) > 0:
+                for k in compare_pairs:
+                    if lwf and len(prev_models)>0:
+                        klg_loss = knowledge_distill_loss(model, prev_models[k],)
+                        loss_penalty += klg_loss
+                    if ewc and len(prev_models)>0:
+                        loss_penalty += self.ewcs[k].penalty(model)
+                loss_penalty /= len(compare_pairs)
             loss += loss_penalty
             loss.backward()
             optimizer.step()
@@ -191,19 +204,22 @@ class ImageClassTraining(VT):
             dataset, batch_size=128, shuffle=True, num_workers=2)
 
 
-ICD = config["taskdata"]
-epsp = EPSP(MC(), device, max_step= 6)
+
+ICD = setting["taskdata"]
+epsp = EPSP(device, max_step= 6)
 #epsp.add_data(name="test",data=fd_test)
 #epsp.add_data(name="train",data=fd_train)
 IC_PARAM = get_config("ic_parameter")
-ic = ICD(trainset+testset, IC_PARAM, evaluator=epsp)
+print(cl.utils.config)
+ic = ICD(trainset+testset, evaluator=epsp, metric =  MC(), **IC_PARAM)
 
+full_name = "{}_{}_{}_{}_".format(args.dataset, args.net, method_name, get_config("full_name"))
 train_cls = ImageClassTraining(max_epoch=100, granularity="converge",\
         evalulator=epsp, taskdata=ic,task_prefix="cifar10_vanilla")
+path = os.path.join("./cl/results/", full_name)
 
-
-train_cls.controlled_train(net)
-epsp.save("./cl/results/cifar10_5_domain_inc")
-save_config("./cl/results/cifar10_5_domain_inc")
+train_cls.controlled_train_single_task(net)
+epsp.save(path)
+save_config(path)
 #test(epoch)
 

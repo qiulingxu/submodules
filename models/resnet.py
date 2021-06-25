@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from cl import ClassificationMask as CM
+from cl.utils import get_config
 
 
 class BasicBlock(nn.Module):
@@ -107,23 +108,23 @@ class ResNet(nn.Module):
 CResNet = CM(ResNet)
 
 def ResNet18():
-    return CResNet(BasicBlock, [2, 2, 2, 2])
+    return CResNet(BasicBlock, [2, 2, 2, 2], num_classes=get_config("CLASS_NUM"))
 
 
 def ResNet34():
-    return CResNet(BasicBlock, [3, 4, 6, 3])
+    return CResNet(BasicBlock, [3, 4, 6, 3], num_classes=get_config("CLASS_NUM"))
 
 
 def ResNet50():
-    return CResNet(Bottleneck, [3, 4, 6, 3])
+    return CResNet(Bottleneck, [3, 4, 6, 3], num_classes=get_config("CLASS_NUM"))
 
 
 def ResNet101():
-    return CResNet(Bottleneck, [3, 4, 23, 3])
+    return CResNet(Bottleneck, [3, 4, 23, 3], num_classes=get_config("CLASS_NUM"))
 
 
 def ResNet152():
-    return CResNet(Bottleneck, [3, 8, 36, 3])
+    return CResNet(Bottleneck, [3, 8, 36, 3], num_classes=get_config("CLASS_NUM"))
 
 
 def test():
