@@ -34,6 +34,7 @@ parser.add_argument("--lwf-lambda", default=1.0)
 parser.add_argument("--ewc", action="store_true")
 parser.add_argument("--ewc-lambda", default=1.0)
 parser.add_argument("--dev-scene", default="sequential")
+parser.add_argument("--inc-setting", default="domain_inc")
 parser.add_argument("--class-seed", default=0)
 args = parser.parse_args()
 
@@ -89,7 +90,7 @@ if ewc:
 if method_name == "":
     method_name = "#vanilla"
 set_config("develop_assumption", args.dev_scene)
-set_config("classification_task", "domain_inc")
+set_config("classification_task", args.inc_setting)
 setting = incremental_config(args.dataset)
 def init_model():
     global net, criterion, optimizer
@@ -219,6 +220,7 @@ class ImageClassTraining(VT):
 
 
 init_model()
+# Get corresponding task data class based on different setting
 ICD = setting["taskdata"]
 epsp = EPSP(device, max_step= 25)
 seed = int(args.class_seed)
