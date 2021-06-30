@@ -30,8 +30,11 @@ parser.add_argument('--resume', '-r', action='store_true',
 parser.add_argument("--dataset", default="cifar10")
 parser.add_argument("--net", default="ResNet18")
 parser.add_argument("--lwf", action="store_true")
+parser.add_argument("--lwf-lambda", default=1.0)
 parser.add_argument("--ewc", action="store_true")
+parser.add_argument("--ewc-lambda", default=1.0)
 parser.add_argument("--dev-scene", default="sequential")
+parser.add_argument("--class-seed", default=0)
 args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -76,50 +79,54 @@ lwf = args.lwf
 ewc = args.ewc
 method_name = ""
 if lwf:
-    method_name += "#lwf"
+    set_config("lwf_lambda", args.lwf_lambda)
+    method_name += "#lwf{:.2e}".format(args.lwf_lambda)
 if ewc:
-    method_name += "#ewc"
+    set_config("ewc_lambda", args.ewc_lambda)
+    method_name += "#ewc{:.2e}".format(args.ewc_lambda)
     #set_config("reset_head_before_task", True)
+    
 if method_name == "":
     method_name = "#vanilla"
 set_config("develop_assumption", args.dev_scene)
 set_config("classification_task", "domain_inc")
 setting = incremental_config(args.dataset)
+def init_model():
+    global net, criterion, optimizer
+    # Model
+    print('==> Building model..')
+    # net = VGG('VGG19')
+    net =  ResNet18()
+    # net = PreActResNet18()
+    # net = GoogLeNet()
+    # net = DenseNet121()
+    # net = ResNeXt29_2x64d()
+    # net = MobileNet()
+    # net = MobileNetV2()
+    # net = DPN92()
+    # net = ShuffleNetG2()
+    # net = SENet18()
+    # net = ShuffleNetV2(1)
+    # net = EfficientNetB0()
+    # net = RegNetX_200MF()
+    #net = SimpleDLA()
+    net = net.to(device)
+    if device == 'cuda':
+        #net = torch.nn.DataParallel(net)
+        cudnn.benchmark = True
 
-# Model
-print('==> Building model..')
-# net = VGG('VGG19')
-net =  ResNet18()
-# net = PreActResNet18()
-# net = GoogLeNet()
-# net = DenseNet121()
-# net = ResNeXt29_2x64d()
-# net = MobileNet()
-# net = MobileNetV2()
-# net = DPN92()
-# net = ShuffleNetG2()
-# net = SENet18()
-# net = ShuffleNetV2(1)
-# net = EfficientNetB0()
-# net = RegNetX_200MF()
-#net = SimpleDLA()
-net = net.to(device)
-if device == 'cuda':
-    #net = torch.nn.DataParallel(net)
-    cudnn.benchmark = True
+    if args.resume:
+        # Load checkpoint.
+        print('==> Resuming from checkpoint..')
+        assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
+        checkpoint = torch.load('./checkpoint/ckpt.pth')
+        net.load_state_dict(checkpoint['net'])
+        best_acc = checkpoint['acc']
+        start_epoch = checkpoint['epoch']
 
-if args.resume:
-    # Load checkpoint.
-    print('==> Resuming from checkpoint..')
-    assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
-    checkpoint = torch.load('./checkpoint/ckpt.pth')
-    net.load_state_dict(checkpoint['net'])
-    best_acc = checkpoint['acc']
-    start_epoch = checkpoint['epoch']
-
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(net.parameters(), lr=args.lr,
-                      momentum=0.9, weight_decay=5e-4)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(net.parameters(), lr=args.lr,
+                        momentum=0.9, weight_decay=5e-4)
 
 
 class ImageClassTraining(VT):
@@ -146,7 +153,7 @@ class ImageClassTraining(VT):
         print('\nEpoch: %d' % epoch)
         model = torch.nn.DataParallel(omodel)
         train_loss = 0
-        correct = 0ls
+        correct = 0
         total = 0
         compare_pairs = []         
         for compare_pair in self.taskdata.comparison:   
@@ -211,24 +218,24 @@ class ImageClassTraining(VT):
 
 
 
+init_model()
 ICD = setting["taskdata"]
 epsp = EPSP(device, max_step= 25)
-
+seed = int(args.class_seed)
 #epsp.add_data(name="test",data=fd_test)
 #epsp.add_data(name="train",data=fd_train)
 IC_PARAM = get_config("ic_parameter")
 print(cl.utils.config)
-ic = ICD(trainset+testset, evaluator=epsp, metric =  MC(), **IC_PARAM)
+ic = ICD(trainset+testset, evaluator=epsp, metric =  MC(), segment_random_seed=seed, **IC_PARAM)
 
 
 train_cls = ImageClassTraining(max_epoch=100, granularity="converge",\
         evalulator=epsp, taskdata=ic,task_prefix="cifar10_vanilla") #
-#full_name = "{}_{}_{}_{}_{}".format(args.dataset, args.net, method_name, get_config("reset_head_before_task"), get_config("full_name"))
 full_name = "{}_{}_{}_{}".format(args.dataset, args.net, method_name, get_config("full_name"))
-path = os.path.join("./cl/results/", full_name)
-
+path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
 
 train_cls.controlled_train_single_task(net)
+os.makedirs(os.path.dirname(path), exist_ok=True)
 epsp.save(path)
 save_config(path)
 #test(epoch)
