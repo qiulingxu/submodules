@@ -21,6 +21,7 @@ from cl import EvalProgressPerSampleClassification as EPSP, \
 from cl.configs.imageclass_config import incremental_config
 from cl.utils import get_config, get_config_default, save_config, set_config
 from cl.algo import knowledge_distill_loss, EWC
+from torch.utils.data import ConcatDataset
 import cl
 from functools import partial
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
@@ -33,7 +34,7 @@ parser.add_argument("--lwf", action="store_true")
 parser.add_argument("--lwf-lambda", default=1.0)
 parser.add_argument("--scratch", action="store_true")
 parser.add_argument("--ewc", action="store_true")
-parser.add_argument("--ewc-lambda", default=1.0)
+parser.add_argument("--ewc-lambda", default=5000.0)
 parser.add_argument("--dev-scene", default="sequential")
 parser.add_argument("--inc-setting", default="domain_inc")
 parser.add_argument("--class-seed", default=0)
@@ -242,7 +243,7 @@ init_model()
 #epsp.add_data(name="train",data=fd_train)
 IC_PARAM = get_config("ic_parameter")
 print(cl.utils.config)
-ic = ICD(trainset+testset, evaluator=epsp, metric =  MC(), segment_random_seed=seed, **IC_PARAM)
+ic = ICD(ConcatDataset([trainset,testset]), evaluator=epsp, metric =  MC(), segment_random_seed=seed, **IC_PARAM)
 
 
 train_cls = ImageClassTraining(max_epoch=100, granularity="converge",\
