@@ -24,18 +24,20 @@ from cl.algo import knowledge_distill_loss, EWC
 import cl
 from functools import partial
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
+parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true',
                     help='resume from checkpoint')
 parser.add_argument("--dataset", default="cifar10")
 parser.add_argument("--net", default="ResNet18")
 parser.add_argument("--lwf", action="store_true")
 parser.add_argument("--lwf-lambda", default=1.0)
+parser.add_argument("--scratch", action="store_true")
 parser.add_argument("--ewc", action="store_true")
 parser.add_argument("--ewc-lambda", default=1.0)
 parser.add_argument("--dev-scene", default="sequential")
 parser.add_argument("--inc-setting", default="domain_inc")
 parser.add_argument("--class-seed", default=0)
+parser.add_argument("--skip-exist",action="store_true")
 args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -73,12 +75,13 @@ testloader = torch.utils.data.DataLoader(
 
 #classes = ('plane', 'car', 'bird', 'cat', 'deer',
 #           'dog', 'frog', 'horse', 'ship', 'truck')
-
+print(type(trainset),type(testset),type(trainset+testset))
 #torch.autograd.set_detect_anomaly(True)
 # configure the max step
 lwf = args.lwf
 ewc = args.ewc
 method_name = ""
+
 if lwf:
     set_config("lwf_lambda", args.lwf_lambda)
     method_name += "#lwf{:.2e}".format(args.lwf_lambda)
@@ -86,7 +89,10 @@ if ewc:
     set_config("ewc_lambda", args.ewc_lambda)
     method_name += "#ewc{:.2e}".format(args.ewc_lambda)
     #set_config("reset_head_before_task", True)
-    
+set_config("reset_net_before_task", args.scratch)
+if args.scratch:
+    method_name += "#scratch"
+
 if method_name == "":
     method_name = "#vanilla"
 set_config("develop_assumption", args.dev_scene)
@@ -134,9 +140,12 @@ class ImageClassTraining(VT):
 
     def _model_process(self, task_name, model: nn.Module, key, step):
         if step == 0:
-            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
             if get_config_default("reset_head_before_task", False):
                 model.reset_head()
+            if get_config("reset_net_before_task"):
+                init_model()
+                model = net
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
         return model
     def pre_train(self):
         self.ewcs = {}
@@ -152,7 +161,8 @@ class ImageClassTraining(VT):
 
     def _train_single(self, omodel, dataloader, prev_models, device, epoch):
         print('\nEpoch: %d' % epoch)
-        model = torch.nn.DataParallel(omodel)
+        model = omodel#torch.nn.DataParallel(omodel)
+        #model.module = omodel
         train_loss = 0
         correct = 0
         total = 0
@@ -175,7 +185,7 @@ class ImageClassTraining(VT):
                         klg_loss = knowledge_distill_loss(model, prev_models[k], inputs)
                         loss_penalty += klg_loss
                     if ewc and len(prev_models)>0:
-                        loss_penalty += self.ewcs[k].penalty(model.module)
+                        loss_penalty += self.ewcs[k].penalty(model)#.module)
                 loss_penalty /= len(compare_pairs)
             loss += loss_penalty
             loss.backward()
@@ -217,13 +227,17 @@ class ImageClassTraining(VT):
         return torch.utils.data.DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle, num_workers=2, sampler=sampler)
 
-
-
-init_model()
-# Get corresponding task data class based on different setting
 ICD = setting["taskdata"]
 epsp = EPSP(device, max_step= 25)
 seed = int(args.class_seed)
+full_name = "{}_{}_{:.1e}_{}_{}".format(args.dataset, args.net, args.lr, method_name, get_config("full_name"))
+path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
+if args.skip_exist:
+    if  os.path.exists(path + "_config.json"):
+        exit()
+init_model()
+# Get corresponding task data class based on different setting
+
 #epsp.add_data(name="test",data=fd_test)
 #epsp.add_data(name="train",data=fd_train)
 IC_PARAM = get_config("ic_parameter")
@@ -233,8 +247,7 @@ ic = ICD(trainset+testset, evaluator=epsp, metric =  MC(), segment_random_seed=s
 
 train_cls = ImageClassTraining(max_epoch=100, granularity="converge",\
         evalulator=epsp, taskdata=ic,task_prefix="cifar10_vanilla") #
-full_name = "{}_{}_{}_{}".format(args.dataset, args.net, method_name, get_config("full_name"))
-path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
+
 
 train_cls.controlled_train_single_task(net)
 os.makedirs(os.path.dirname(path), exist_ok=True)
