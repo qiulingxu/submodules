@@ -1,4 +1,5 @@
 '''Train CIFAR10 with PyTorch.'''
+from numpy import full
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -38,6 +39,7 @@ parser.add_argument("--ewc-lambda", default=5000.0)
 parser.add_argument("--dev-scene", default="sequential")
 parser.add_argument("--inc-setting", default="domain_inc")
 parser.add_argument("--class-seed", default=0)
+parser.add_argument("--correct-set", action="store_true")
 parser.add_argument("--skip-exist",action="store_true")
 args = parser.parse_args()
 
@@ -86,6 +88,8 @@ method_name = ""
 if lwf:
     set_config("lwf_lambda", args.lwf_lambda)
     method_name += "#lwf{:.2e}".format(args.lwf_lambda)
+    if args.correct_set:
+        method_name += "#corrset"
 if ewc:
     set_config("ewc_lambda", args.ewc_lambda)
     method_name += "#ewc{:.2e}".format(args.ewc_lambda)
@@ -171,19 +175,26 @@ class ImageClassTraining(VT):
         for compare_pair in self.taskdata.comparison:   
             if compare_pair[-1] == self.curr_order:
                 compare_pairs.append(compare_pair[0])        
-        print("current compare pairs", compare_pairs)     
-        for batch_idx, (inputs, targets) in enumerate(dataloader):
+        print("current compare pairs", compare_pairs)   
+        metric = self.taskdata.get_metric(self.curr_task_name)  
+        for batch_idx, (oinputs, otargets) in enumerate(dataloader):
             #print(inputs.shape, targets.shape)
-            inputs, targets = inputs.to(device), targets.to(device)
+            oinputs, otargets = oinputs.to(device), otargets.to(device)
             optimizer.zero_grad()
-            outputs = model(inputs)
+            outputs_full = model(oinputs, full=True)
+            outputs = omodel.process_output(outputs_full)
             targets = omodel.process_labels(targets)
             loss = criterion(outputs, targets)
             loss_penalty = 0
             if len(compare_pairs) > 0:
                 for k in compare_pairs:
                     if lwf and len(prev_models)>0:
-                        klg_loss = knowledge_distill_loss(model, prev_models[k], inputs)
+                        prev_output = prev_models[k](oinputs, full=True)
+                        if args.correct_set:
+                            mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
+                        else:
+                            mask = None
+                        klg_loss = knowledge_distill_loss(outputs_full, prev_output, prev_models[k], oinputs, mask=mask)
                         loss_penalty += klg_loss
                     if ewc and len(prev_models)>0:
                         loss_penalty += self.ewcs[k].penalty(model)#.module)

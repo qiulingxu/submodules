@@ -30,11 +30,11 @@ def run_cmd(device, trial, arg=None):
     os.system(cmd)
 
 args = ["""--dataset="cifar10" --ewc --inc-setting="data_inc"  """,
-        """--dataset="cifar10" --inc-setting="data_inc" """,
-        """--dataset="cifar10" --lwf --inc-setting="domain_inc" """,
-        """--dataset="cifar10" --inc-setting="domain_inc" """,
-        """--dataset="cifar10" --ewc --inc-setting="domain_inc" """,
-        """--dataset="cifar10" --lwf --inc-setting="data_inc" """,] 
+        #"""--dataset="cifar10" --inc-setting="data_inc" """,
+        #"""--dataset="cifar10" --lwf --inc-setting="domain_inc" """,
+        #"""--dataset="cifar10" --inc-setting="domain_inc" """,
+        """--dataset="cifar10" --ewc --inc-setting="domain_inc" """,]
+        #"""--dataset="cifar10" --lwf --inc-setting="data_inc" """,] 
 Num = 4
 results = []
 p = Pool(Num)
