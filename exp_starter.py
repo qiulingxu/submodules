@@ -31,7 +31,7 @@ for ds in ["cifar10"]:
         for method in ["--lwf", "--ewc", "", "--lwf --unsup-kd","--lwf --correct-set",]:
             args.append(""" --dataset="{}" --inc-setting="{}" {} """.
                 format(ds, set, method))
-Num = 4
+Num = 8
 results = []
 p = Pool(Num)
 for k in range(len(args)):
