@@ -25,6 +25,12 @@ args = [#"""--dataset="cifar10" --ewc --inc-setting="data_inc"  """,
         #"""--dataset="cifar10" --inc-setting="domain_inc" """,
         #"""--dataset="cifar10" --ewc --inc-setting="domain_inc" """,]
         #] 
+args = []
+for ds in ["cifar10"]:
+    for set in ["data_inc"]:#"domain_inc", ]:
+        for method in ["--lwf", "--ewc", "", "--lwf --unsup-kd","--lwf --correct-set",]:
+            args.append(""" --dataset="{}" --inc-setting="{}" {} """.
+                format(ds, set, method))
 Num = 4
 results = []
 p = Pool(Num)
@@ -36,7 +42,7 @@ for k in range(len(args)):
                 break
             except:
                 pass
-        args[k] += " --skip-exist --smalldata"
+        args[k] += "--smalldata" # --skip-exist 
         arg = (deviceID,t,args[k])
         kwarg = {}
         results.append( p.apply_async(run_cmd, arg, kwarg))

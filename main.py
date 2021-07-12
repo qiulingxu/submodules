@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
+from torch.optim import optimizer
 
 import torchvision
 import torchvision.transforms as transforms
@@ -80,12 +81,12 @@ else:
     sup_method = ""
 
 trainset = ds(
-    root='./data', train=True, download=True, transform=transform_train)
+    root='./data', train=True, download=True)#, transform=transform_train)
 trainloader = torch.utils.data.DataLoader(
     trainset, batch_size=128, shuffle=True, num_workers=8)
 
 testset = ds(
-    root='./data', train=False, download=True, transform=transform_test)
+    root='./data', train=False, download=True)#, transform=transform_test)
 testloader = torch.utils.data.DataLoader(
     testset, batch_size=100, shuffle=False, num_workers=8)
 
@@ -152,8 +153,9 @@ def init_model():
         start_epoch = checkpoint['epoch']
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(net.parameters(), lr=args.lr,
-                        momentum=0.9, weight_decay=5e-4)
+    #optimizer = optim.SGD(net.parameters(), lr=args.lr,
+    #                    momentum=0.9, weight_decay=5e-4)
+    optimizer = optim.Adam(net.parameters(), lr=args.lr, weight_decay=5e-4)
 
 
 class ImageClassTraining(VT):
@@ -181,6 +183,33 @@ class ImageClassTraining(VT):
             _ewc.eval_fisher()
             self.ewcs[self.curr_order] = _ewc
 
+    def calculate_loss(self, oinputs, otargets, model, compare_pairs, prev_models, metric):
+        outputs_full = model(oinputs, full=True)
+        outputs = model.process_output(outputs_full)
+        targets = model.process_labels(otargets)
+        loss = criterion(outputs, targets)
+        loss_penalty = 0
+        if len(compare_pairs) > 0:
+            for k in compare_pairs:
+                if lwf and len(prev_models)>0:
+                    prev_output = prev_models[k](oinputs, full=True)
+                    #bug? use full instead of processing output for metric
+                    if args.correct_set:
+                        mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
+                    else:
+                        mask = None
+                    if args.unsup_kd:
+                        x_unsup, _ = next(self.dl_unsup)
+                        x_kd = x_unsup.to(device)
+                    else:
+                        x_kd = oinputs
+                    klg_loss = knowledge_distill_loss(outputs_full, prev_output, prev_models[k], x_kd, mask=mask)
+                    loss_penalty += klg_loss
+                if ewc and len(prev_models)>0:
+                    loss_penalty += self.ewcs[k].penalty(model)#.module)
+            loss_penalty /= len(compare_pairs)
+        loss += loss_penalty
+        return loss, loss_penalty, outputs, targets
 
     def _train_single(self, omodel, dataloader, prev_models, device, epoch):
         print('\nEpoch: %d' % epoch)
@@ -199,30 +228,7 @@ class ImageClassTraining(VT):
             #print(inputs.shape, targets.shape)
             oinputs, otargets = oinputs.to(device), otargets.to(device)
             optimizer.zero_grad()
-            outputs_full = model(oinputs, full=True)
-            outputs = omodel.process_output(outputs_full)
-            targets = omodel.process_labels(otargets)
-            loss = criterion(outputs, targets)
-            loss_penalty = 0
-            if len(compare_pairs) > 0:
-                for k in compare_pairs:
-                    if lwf and len(prev_models)>0:
-                        prev_output = prev_models[k](oinputs, full=True)
-                        if args.correct_set:
-                            mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
-                        else:
-                            mask = None
-                        if args.unsup_kd:
-                            x_unsup, _ = next(self.dl_unsup)
-                            x_kd = x_unsup.to(device)
-                        else:
-                            x_kd = oinputs
-                        klg_loss = knowledge_distill_loss(outputs_full, prev_output, prev_models[k], x_kd, mask=mask)
-                        loss_penalty += klg_loss
-                    if ewc and len(prev_models)>0:
-                        loss_penalty += self.ewcs[k].penalty(model)#.module)
-                loss_penalty /= len(compare_pairs)
-            loss += loss_penalty
+            loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
             loss.backward()
             optimizer.step()
 
@@ -235,26 +241,31 @@ class ImageClassTraining(VT):
                         % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
         self.scheduler.step()
         print(len(prev_models), loss_penalty)
-    def _eval(self, model, dataloader, prev_models, device, epoch):
+    def _eval_single(self, model, dataloader, prev_models, device, epoch):
         model.eval()
         test_loss = 0
         correct = 0
         total = 0
         print("eval")
+        compare_pairs = []         
+        for compare_pair in self.taskdata.comparison:   
+           if compare_pair[-1] == self.curr_order:
+                compare_pairs.append(compare_pair[0])        
+        print("current compare pairs", compare_pairs)   
+        metric = self.taskdata.get_metric(self.curr_task_name) 
         with torch.no_grad():
-            for batch_idx, (inputs, targets) in enumerate(dataloader):
-                inputs, targets = inputs.to(device), targets.to(device)
-                targets = model.process_labels(targets)
-                outputs = net(inputs)
-                loss = criterion(outputs, targets)
-
-                test_loss += loss.item()
+            for batch_idx, (oinputs, otargets) in enumerate(dataloader):
+                oinputs, otargets = oinputs.to(device), otargets.to(device)
+                loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
                 _, predicted = outputs.max(1)
+                test_loss += loss.item()*targets.size(0)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
 
-                progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                            % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
+                #progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
+                #            % (test_loss/total, 100.*correct/total, correct, total))
+        print("eval loss", test_loss/total)
+        return test_loss/total
 
     def process_data(self, dataset, mode, batch_size=None, sampler=None, shuffle=True):
         if batch_size is None:
@@ -270,7 +281,7 @@ if args.smalldata:
     ds_name = args.dataset + "_small"
 else:
     ds_name = args.dataset
-full_name = "{}_{}_{:.1e}_{}_{}_{}".format(ds_name, args.net, args.lr, method_name, sup_method, get_config("full_name"))
+full_name = "{}_{}_{:.1e}_{}{}_{}".format(ds_name, args.net, args.lr, method_name, sup_method, get_config("full_name"))
 path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
 if args.skip_exist:
     if  os.path.exists(path + "_config.json"):
@@ -284,14 +295,19 @@ IC_PARAM = get_config("ic_parameter")
 print(cl.utils.config)
 ds = ConcatDataset([trainset,testset])
 if args.smalldata:
-    ds, ds_remained = torch.utils.data.random_split(ds, [10000, 50000])
+    ds, ds_remained = torch.utils.data.random_split(ds, [10000, 50000], generator=torch.Generator().manual_seed(seed))
 if args.unsup_kd:
     if args.unsupdata == "":
         ds_unsup  = ds_remained
     elif args.unsupdata == "imagenet":
         from cl.dataset.d2lmdb import ImageFolderLMDB
         ds_unsup = ImageFolderLMDB("imagenet-train.ldmb")
-ic = ICD(ds, evaluator=epsp, metric =  MC(), segment_random_seed=seed, **IC_PARAM)
+    from cl.taskdata import OverideTransformDataset
+    ds_unsup = OverideTransformDataset(ds_unsup, transform_train)
+ic = ICD(ds, evaluator=epsp, metric =  MC(), segment_random_seed=seed, 
+            training_transform=transform_train, 
+            testing_transform=transform_test,
+            **IC_PARAM)
 
 
 train_cls = ImageClassTraining(max_epoch=100, granularity="converge",\
