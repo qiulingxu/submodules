@@ -192,7 +192,8 @@ class ImageClassTraining(VT):
         if len(compare_pairs) > 0:
             for k in compare_pairs:
                 if lwf and len(prev_models)>0:
-                    prev_output = prev_models[k](oinputs, full=True)
+                    prev_full = prev_models[k](oinputs, full=True)
+                    prev_output = prev_models[k].process_output(prev_full)
                     #bug? use full instead of processing output for metric
                     if args.correct_set:
                         mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
@@ -203,7 +204,7 @@ class ImageClassTraining(VT):
                         x_kd = x_unsup.to(device)
                     else:
                         x_kd = oinputs
-                    klg_loss = knowledge_distill_loss(outputs_full, prev_output, prev_models[k], x_kd, mask=mask)
+                    klg_loss = knowledge_distill_loss(outputs_full, prev_full, prev_models[k], x_kd, mask=mask)
                     loss_penalty += klg_loss
                 if ewc and len(prev_models)>0:
                     loss_penalty += self.ewcs[k].penalty(model)#.module)
