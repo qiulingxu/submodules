@@ -5,18 +5,7 @@ from multiprocessing import Pool # Pool
 import os
 import subprocess
 import time
-parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
-parser.add_argument('--resume', '-r', action='store_true',
-                    help='resume from checkpoint')
-parser.add_argument("--dataset", default="cifar10")
-parser.add_argument("--net", default="ResNet18")
-parser.add_argument("--lwf", action="store_true")
-parser.add_argument("--lwf-lambda", default=1.0)
-parser.add_argument("--ewc", action="store_true")
-parser.add_argument("--ewc-lambda", default=1.0)
-parser.add_argument("--dev-scene", default="sequential")
-parser.add_argument("--class-seed")
+
 #args = parser.parse_args()
 
 def run_cmd(device, trial, arg=None):
@@ -29,12 +18,13 @@ def run_cmd(device, trial, arg=None):
     print(cmd)
     os.system(cmd)
 
-args = ["""--dataset="cifar10" --ewc --inc-setting="data_inc"  """,
+args = [#"""--dataset="cifar10" --ewc --inc-setting="data_inc"  """,
+        """--dataset="cifar10" --lwf --inc-setting="data_inc" """,
         #"""--dataset="cifar10" --inc-setting="data_inc" """,
-        #"""--dataset="cifar10" --lwf --inc-setting="domain_inc" """,
+        """--dataset="cifar10" --lwf --inc-setting="domain_inc" """,]
         #"""--dataset="cifar10" --inc-setting="domain_inc" """,
-        """--dataset="cifar10" --ewc --inc-setting="domain_inc" """,]
-        #"""--dataset="cifar10" --lwf --inc-setting="data_inc" """,] 
+        #"""--dataset="cifar10" --ewc --inc-setting="domain_inc" """,]
+        #] 
 Num = 4
 results = []
 p = Pool(Num)
@@ -46,7 +36,7 @@ for k in range(len(args)):
                 break
             except:
                 pass
-        args[k] += " --skip-exist"
+        args[k] += " --skip-exist --smalldata"
         arg = (deviceID,t,args[k])
         kwarg = {}
         results.append( p.apply_async(run_cmd, arg, kwarg))

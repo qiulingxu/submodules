@@ -20,7 +20,7 @@ from cl import EvalProgressPerSampleClassification as EPSP, \
     ClassificationTrain as VT, \
     ClassificationMask as CM
 from cl.configs.imageclass_config import incremental_config
-from cl.utils import get_config, get_config_default, save_config, set_config
+from cl.utils import get_config, get_config_default, save_config, set_config, repeat_dataloader
 from cl.algo import knowledge_distill_loss, EWC
 from torch.utils.data import ConcatDataset
 import cl
@@ -30,6 +30,9 @@ parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true',
                     help='resume from checkpoint')
 parser.add_argument("--dataset", default="cifar10")
+parser.add_argument("--smalldata",action="store_true")
+parser.add_argument("--unsupdata",default="")
+parser.add_argument("--unsup-kd",action="store_true")
 parser.add_argument("--net", default="ResNet18")
 parser.add_argument("--lwf", action="store_true")
 parser.add_argument("--lwf-lambda", default=1.0)
@@ -66,6 +69,16 @@ if args.dataset == "cifar10":
 elif args.dataset == "cifar100":
     ds = torchvision.datasets.CIFAR100
 
+if args.smalldata and args.unsup_kd:
+    if args.unsupdata == "":
+        sup_method = "#US_sameD"
+    elif args.unsupdata == "imagenet":
+        sup_method = "#US_ImageNet"
+    else:
+        assert False
+else:
+    sup_method = ""
+
 trainset = ds(
     root='./data', train=True, download=True, transform=transform_train)
 trainloader = torch.utils.data.DataLoader(
@@ -88,6 +101,8 @@ method_name = ""
 if lwf:
     set_config("lwf_lambda", args.lwf_lambda)
     method_name += "#lwf{:.2e}".format(args.lwf_lambda)
+    if args.unsup_kd:
+        method_name += "_unsup"
     if args.correct_set:
         method_name += "#corrset"
 if ewc:
@@ -154,6 +169,9 @@ class ImageClassTraining(VT):
         return model
     def pre_train(self):
         self.ewcs = {}
+        if args.unsup_kd:
+            self.dl_unsup = repeat_dataloader(self.process_data(ds_unsup, "test"))
+
             
 
     def post_task(self):
@@ -173,7 +191,7 @@ class ImageClassTraining(VT):
         total = 0
         compare_pairs = []         
         for compare_pair in self.taskdata.comparison:   
-            if compare_pair[-1] == self.curr_order:
+           if compare_pair[-1] == self.curr_order:
                 compare_pairs.append(compare_pair[0])        
         print("current compare pairs", compare_pairs)   
         metric = self.taskdata.get_metric(self.curr_task_name)  
@@ -183,7 +201,7 @@ class ImageClassTraining(VT):
             optimizer.zero_grad()
             outputs_full = model(oinputs, full=True)
             outputs = omodel.process_output(outputs_full)
-            targets = omodel.process_labels(targets)
+            targets = omodel.process_labels(otargets)
             loss = criterion(outputs, targets)
             loss_penalty = 0
             if len(compare_pairs) > 0:
@@ -194,7 +212,12 @@ class ImageClassTraining(VT):
                             mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
                         else:
                             mask = None
-                        klg_loss = knowledge_distill_loss(outputs_full, prev_output, prev_models[k], oinputs, mask=mask)
+                        if args.unsup_kd:
+                            x_unsup, _ = next(self.dl_unsup)
+                            x_kd = x_unsup.to(device)
+                        else:
+                            x_kd = oinputs
+                        klg_loss = knowledge_distill_loss(outputs_full, prev_output, prev_models[k], x_kd, mask=mask)
                         loss_penalty += klg_loss
                     if ewc and len(prev_models)>0:
                         loss_penalty += self.ewcs[k].penalty(model)#.module)
@@ -242,7 +265,12 @@ class ImageClassTraining(VT):
 ICD = setting["taskdata"]
 epsp = EPSP(device, max_step= 25)
 seed = int(args.class_seed)
-full_name = "{}_{}_{:.1e}_{}_{}".format(args.dataset, args.net, args.lr, method_name, get_config("full_name"))
+
+if args.smalldata:
+    ds_name = args.dataset + "_small"
+else:
+    ds_name = args.dataset
+full_name = "{}_{}_{:.1e}_{}_{}_{}".format(ds_name, args.net, args.lr, method_name, sup_method, get_config("full_name"))
 path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
 if args.skip_exist:
     if  os.path.exists(path + "_config.json"):
@@ -254,7 +282,16 @@ init_model()
 #epsp.add_data(name="train",data=fd_train)
 IC_PARAM = get_config("ic_parameter")
 print(cl.utils.config)
-ic = ICD(ConcatDataset([trainset,testset]), evaluator=epsp, metric =  MC(), segment_random_seed=seed, **IC_PARAM)
+ds = ConcatDataset([trainset,testset])
+if args.smalldata:
+    ds, ds_remained = torch.utils.data.random_split(ds, [10000, 50000])
+if args.unsup_kd:
+    if args.unsupdata == "":
+        ds_unsup  = ds_remained
+    elif args.unsupdata == "imagenet":
+        from cl.dataset.d2lmdb import ImageFolderLMDB
+        ds_unsup = ImageFolderLMDB("imagenet-train.ldmb")
+ic = ICD(ds, evaluator=epsp, metric =  MC(), segment_random_seed=seed, **IC_PARAM)
 
 
 train_cls = ImageClassTraining(max_epoch=100, granularity="converge",\
