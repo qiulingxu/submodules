@@ -33,6 +33,7 @@ parser.add_argument('--resume', '-r', action='store_true',
 parser.add_argument("--dataset", default="cifar10")
 parser.add_argument("--smalldata",action="store_true")
 parser.add_argument("--unsupdata",default="")
+parser.add_argument("--trainaug",default="")
 parser.add_argument("--unsup-kd",action="store_true")
 parser.add_argument("--net", default="ResNet18")
 parser.add_argument("--lwf", action="store_true")
@@ -53,17 +54,27 @@ start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
 # Data
 print('==> Preparing data..')
-transform_train = transforms.Compose([
-    #transforms.RandomCrop(32, padding=4),
-    #transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
+assert args.trainaug in ["", "CF"]
 
 transform_test = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
+
+# Crop Flip
+if args.trainaug == "":
+    transform_train = transform_test
+    Daug_method = ""
+elif args.trainaug == "CF":
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+    Daug_method = "#Aug_" + args.trainaug
+
+
 
 if args.dataset == "cifar10":
     ds = torchvision.datasets.CIFAR10
@@ -215,6 +226,7 @@ class ImageClassTraining(VT):
     def _train_single(self, omodel, dataloader, prev_models, device, epoch):
         print('\nEpoch: %d' % epoch)
         model = omodel#torch.nn.DataParallel(omodel)
+        model.train()
         #model.module = omodel
         train_loss = 0
         correct = 0
@@ -282,7 +294,7 @@ if args.smalldata:
     ds_name = args.dataset + "_small"
 else:
     ds_name = args.dataset
-full_name = "{}_{}_{:.1e}_{}{}_{}".format(ds_name, args.net, args.lr, method_name, sup_method, get_config("full_name"))
+full_name = "{}{}_{}_{:.1e}_{}{}_{}".format(ds_name, Daug_method, args.net, args.lr, method_name, sup_method, get_config("full_name"))
 path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
 if args.skip_exist:
     if  os.path.exists(path + "_config.json"):
@@ -311,7 +323,7 @@ ic = ICD(ds, evaluator=epsp, metric =  MC(), segment_random_seed=seed,
             **IC_PARAM)
 
 
-train_cls = ImageClassTraining(max_epoch=100, granularity="converge",\
+train_cls = ImageClassTraining(max_epoch=200, granularity="converge",\
         evalulator=epsp, taskdata=ic,task_prefix="cifar10_vanilla") #
 
 

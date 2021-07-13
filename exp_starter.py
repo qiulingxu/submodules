@@ -27,10 +27,17 @@ args = [#"""--dataset="cifar10" --ewc --inc-setting="data_inc"  """,
         #] 
 args = []
 for ds in ["cifar10"]:
-    for set in ["data_inc"]:#"domain_inc", ]:
-        for method in ["--lwf", "--ewc", "", "--lwf --unsup-kd","--lwf --correct-set",]:
+    for set in ["data_inc","domain_inc"]:#"domain_inc", ]:
+        for method in ["--lwf", "--ewc", "", "--lwf --correct-set",]:#"--lwf --unsup-kd",
             args.append(""" --dataset="{}" --inc-setting="{}" {} """.
                 format(ds, set, method))
+args = []
+for ds in ["cifar10"]:
+    for set in ["data_inc"]:#"domain_inc", ]:
+        for method in ["--trainaug='CF' "]:#"--lwf --unsup-kd", "--scratch", "--lwf", "--ewc", "", "--lwf --correct-set",]:#
+            for option in [""]:#"--lr=0.001"]:
+                args.append(""" --dataset="{}" --inc-setting="{}" {} --smalldata {} """.
+                    format(ds, set, method, option))
 Num = 8
 results = []
 p = Pool(Num)
@@ -42,7 +49,7 @@ for k in range(len(args)):
                 break
             except:
                 pass
-        args[k] += "--smalldata" # --skip-exist 
+        args[k] += ""#--smalldata" # --skip-exist 
         arg = (deviceID,t,args[k])
         kwarg = {}
         results.append( p.apply_async(run_cmd, arg, kwarg))
