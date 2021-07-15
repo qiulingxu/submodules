@@ -74,9 +74,10 @@ class Bottleneck(nn.Module):
 
 
 class ResNet(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10):
+    def __init__(self, block, num_blocks, num_classes=10, procfunc = None):
         super(ResNet, self).__init__()
         self.in_planes = 64
+        self.procfunc = procfunc
 
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
                                stride=1, padding=1, bias=False)
@@ -96,6 +97,8 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        if self.procfunc is not None:
+            x = self.procfunc(x)
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.layer1(out)
         out = self.layer2(out)
@@ -107,24 +110,24 @@ class ResNet(nn.Module):
         return out
 CResNet = CM(ResNet)
 
-def ResNet18():
-    return CResNet(BasicBlock, [2, 2, 2, 2], num_classes=get_config("CLASS_NUM"))
+def ResNet18(**karg):
+    return CResNet(BasicBlock, [2, 2, 2, 2], num_classes=get_config("CLASS_NUM"), **karg)
 
 
-def ResNet34():
-    return CResNet(BasicBlock, [3, 4, 6, 3], num_classes=get_config("CLASS_NUM"))
+def ResNet34(**karg):
+    return CResNet(BasicBlock, [3, 4, 6, 3], num_classes=get_config("CLASS_NUM"), **karg)
 
 
-def ResNet50():
-    return CResNet(Bottleneck, [3, 4, 6, 3], num_classes=get_config("CLASS_NUM"))
+def ResNet50(**karg):
+    return CResNet(Bottleneck, [3, 4, 6, 3], num_classes=get_config("CLASS_NUM"), **karg)
 
 
-def ResNet101():
-    return CResNet(Bottleneck, [3, 4, 23, 3], num_classes=get_config("CLASS_NUM"))
+def ResNet101(**karg):
+    return CResNet(Bottleneck, [3, 4, 23, 3], num_classes=get_config("CLASS_NUM"), **karg)
 
 
-def ResNet152():
-    return CResNet(Bottleneck, [3, 8, 36, 3], num_classes=get_config("CLASS_NUM"))
+def ResNet152(**karg):
+    return CResNet(Bottleneck, [3, 8, 36, 3], num_classes=get_config("CLASS_NUM"), **karg)
 
 
 def test():

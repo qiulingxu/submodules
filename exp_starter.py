@@ -27,16 +27,36 @@ args = [#"""--dataset="cifar10" --ewc --inc-setting="data_inc"  """,
         #] 
 args = []
 for ds in ["cifar10"]:
-    for set in ["data_inc","domain_inc"]:#"domain_inc", ]:
-        for method in ["--lwf", "--ewc", "", "--lwf --correct-set",]:#"--lwf --unsup-kd",
-            args.append(""" --dataset="{}" --inc-setting="{}" {} """.
-                format(ds, set, method))
-args = []
+    for set in ["data_inc"]:#,"domain_inc"]:#"domain_inc", ]:
+        for option1 in ["--lr=0.001 --smalldata"]:
+            for method in ["--lwf", "--ewc", "", "--scratch", "--lwf --correct-set","--lwf --unsup-kd", ]:#
+                for option2 in ["--trainaug='CF'", ""]: #
+                        args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
+                            format(ds, set, method, option1, option2))
+            for method in [""]:
+                for option2 in ["--trainaug='CF_ADV'", "--trainaug='ADV'"]: #
+                        args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
+                            format(ds, set, method, option1, option2))
+
+for ds in ["cifar10"]:
+    for set in ["data_inc"]:#,"domain_inc"]:#"domain_inc", ]:
+        for option1 in ["--lr=0.001"]:
+            for method in ["--lwf", "--ewc", "", "--scratch", "--lwf --correct-set" ]:#
+                for option2 in ["--trainaug='CF'", ""]: #
+                        args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
+                            format(ds, set, method, option1, option2))
+            for method in [""]:
+                for option2 in ["--trainaug='CF_ADV'", "--trainaug='ADV'"]: #
+                        args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
+                            format(ds, set, method, option1, option2))
+
+
 for ds in ["cifar10"]:
     for set in ["data_inc"]:#"domain_inc", ]:
-        for method in ["--trainaug='CF' "]:#"--lwf --unsup-kd", "--scratch", "--lwf", "--ewc", "", "--lwf --correct-set",]:#
-            for option in [""]:#"--lr=0.001"]:
-                args.append(""" --dataset="{}" --inc-setting="{}" {} --smalldata {} """.
+        for method in ["--scratch --trainaug='CF' ",  "--ewc --trainaug='CF'", "--trainaug='CF_ADV'"]:#"--lwf --unsup-kd",
+            for option in ["--lr=0.001 "]: #--smalldata
+                break
+                args.append(""" --dataset="{}" --inc-setting="{}" {}  {} """.
                     format(ds, set, method, option))
 Num = 8
 results = []

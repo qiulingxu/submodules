@@ -19,9 +19,10 @@ from cl import EvalProgressPerSampleClassification as EPSP, \
     FixDataMemoryBatchClassification as FD, \
     MetricClassification as MC, \
     ClassificationTrain as VT, \
-    ClassificationMask as CM
+    ClassificationMask as CM, \
+    FastGradientSign as FGS
 from cl.configs.imageclass_config import incremental_config
-from cl.utils import get_config, get_config_default, save_config, set_config, repeat_dataloader
+from cl.utils import PytorchModeWrap, get_config, get_config_default, save_config, set_config, repeat_dataloader
 from cl.algo import knowledge_distill_loss, EWC
 from torch.utils.data import ConcatDataset
 import cl
@@ -54,27 +55,30 @@ start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
 # Data
 print('==> Preparing data..')
-assert args.trainaug in ["", "CF"]
+assert args.trainaug in ["", "CF", "ADV","CF_ADV"]
 
 transform_test = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
+USE_CF = args.trainaug .find("CF")>=0
+USE_ADV = args.trainaug .find("ADV")>=0
+
+assert not args.unsup_kd or not args.correct_set
 # Crop Flip
 if args.trainaug == "":
     transform_train = transform_test
     Daug_method = ""
-elif args.trainaug == "CF":
+else:
+    Daug_method = "#Aug_" + args.trainaug
+if USE_CF :
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
-    Daug_method = "#Aug_" + args.trainaug
-
-
+else:
+    transform_train = transform_test
 
 if args.dataset == "cifar10":
     ds = torchvision.datasets.CIFAR10
@@ -90,6 +94,8 @@ if args.smalldata and args.unsup_kd:
         assert False
 else:
     sup_method = ""
+
+proc_func = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
 
 trainset = ds(
     root='./data', train=True, download=True)#, transform=transform_train)
@@ -131,11 +137,19 @@ set_config("develop_assumption", args.dev_scene)
 set_config("classification_task", args.inc_setting)
 setting = incremental_config(args.dataset)
 def init_model():
-    global net, criterion, optimizer
+    global net, criterion, optimizer, ds_name
     # Model
     print('==> Building model..')
     # net = VGG('VGG19')
-    net =  ResNet18()
+    torch.manual_seed(seed)
+    net =  ResNet18(procfunc=proc_func)
+    os.makedirs("fix_init",exist_ok=True)
+    cp_name = os.path.join("fix_init",ds_name + args.net+ str(seed))
+    if os.path.exists(cp_name):
+        net.load_state_dict(torch.load(cp_name))
+    else:
+        torch.save(net.state_dict(), cp_name)
+
     # net = PreActResNet18()
     # net = GoogLeNet()
     # net = DenseNet121()
@@ -166,6 +180,7 @@ def init_model():
     criterion = nn.CrossEntropyLoss()
     #optimizer = optim.SGD(net.parameters(), lr=args.lr,
     #                    momentum=0.9, weight_decay=5e-4)
+    torch.manual_seed(seed)
     optimizer = optim.Adam(net.parameters(), lr=args.lr, weight_decay=5e-4)
 
 
@@ -184,7 +199,8 @@ class ImageClassTraining(VT):
         self.ewcs = {}
         if args.unsup_kd:
             self.dl_unsup = repeat_dataloader(self.process_data(ds_unsup, "test"))
-
+        if USE_ADV:
+            self.fgs = FGS(epsilon=1.0/255,alpha = 1.0/4/255, min_val = 0.0, max_val = 1.0, max_iters = 8)
             
 
     def post_task(self):
@@ -201,23 +217,31 @@ class ImageClassTraining(VT):
         loss = criterion(outputs, targets)
         loss_penalty = 0
         if len(compare_pairs) > 0:
-            for k in compare_pairs:
-                if lwf and len(prev_models)>0:
-                    prev_full = prev_models[k](oinputs, full=True)
-                    prev_output = prev_models[k].process_output(prev_full)
-                    #bug? use full instead of processing output for metric
-                    if args.correct_set:
-                        mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
-                    else:
-                        mask = None
-                    if args.unsup_kd:
-                        x_unsup, _ = next(self.dl_unsup)
-                        x_kd = x_unsup.to(device)
-                    else:
-                        x_kd = oinputs
-                    klg_loss = knowledge_distill_loss(outputs_full, prev_full, prev_models[k], x_kd, mask=mask)
-                    loss_penalty += klg_loss
-                if ewc and len(prev_models)>0:
+            if lwf and len(prev_models)>0:
+                ### We use test mode to calculate for knowlege distillation loss
+                with PytorchModeWrap(model, False):
+                    outputs = model.process_output(outputs_full)
+                    targets = model.process_labels(otargets)                    
+                    for k in compare_pairs:
+                        prev_full = prev_models[k](oinputs, full=True)
+                        prev_output = prev_models[k].process_output(prev_full)
+                        #bug? use full instead of processing output for metric
+                        if args.correct_set:
+                            mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
+                        else:
+                            mask = None
+                        if args.unsup_kd:
+                            x_unsup, _ = next(self.dl_unsup)
+                            x_kd = x_unsup.to(device)
+                            kd_output = model(x_kd, full=True)
+                            kd_prev_output = prev_models[k](x_kd, full=True)
+                        else:
+                            kd_output = outputs_full
+                            kd_prev_output = prev_full
+                        klg_loss = knowledge_distill_loss(kd_output, kd_prev_output, prev_models[k], mask=mask)
+                        loss_penalty += klg_loss
+            if ewc and len(prev_models)>0:
+                for k in compare_pairs:
                     loss_penalty += self.ewcs[k].penalty(model)#.module)
             loss_penalty /= len(compare_pairs)
         loss += loss_penalty
@@ -240,6 +264,9 @@ class ImageClassTraining(VT):
         for batch_idx, (oinputs, otargets) in enumerate(dataloader):
             #print(inputs.shape, targets.shape)
             oinputs, otargets = oinputs.to(device), otargets.to(device)
+            if USE_ADV:
+                #print(oinputs.size())
+                oinputs = self.fgs.perturb(model, oinputs, model.process_labels(otargets),)
             optimizer.zero_grad()
             loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
             loss.backward()
@@ -269,6 +296,7 @@ class ImageClassTraining(VT):
         with torch.no_grad():
             for batch_idx, (oinputs, otargets) in enumerate(dataloader):
                 oinputs, otargets = oinputs.to(device), otargets.to(device)
+                
                 loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
                 _, predicted = outputs.max(1)
                 test_loss += loss.item()*targets.size(0)
@@ -284,7 +312,7 @@ class ImageClassTraining(VT):
         if batch_size is None:
             batch_size = 128
         return torch.utils.data.DataLoader(
-            dataset, batch_size=batch_size, shuffle=shuffle, num_workers=2, sampler=sampler)
+            dataset, batch_size=batch_size, shuffle=shuffle, num_workers=8, sampler=sampler, generator=torch.Generator().manual_seed(seed))
 
 ICD = setting["taskdata"]
 epsp = EPSP(device, max_step= 25)
@@ -294,7 +322,7 @@ if args.smalldata:
     ds_name = args.dataset + "_small"
 else:
     ds_name = args.dataset
-full_name = "{}{}_{}_{:.1e}_{}{}_{}".format(ds_name, Daug_method, args.net, args.lr, method_name, sup_method, get_config("full_name"))
+full_name = "{}{}_{}_{:.1e}_{}{}_{}_FixInit".format(ds_name, Daug_method, args.net, args.lr, method_name, sup_method, get_config("full_name"))
 path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
 if args.skip_exist:
     if  os.path.exists(path + "_config.json"):
