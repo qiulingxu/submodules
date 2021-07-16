@@ -11,6 +11,7 @@ import torchvision
 import torchvision.transforms as transforms
 
 import os
+import copy
 import argparse
 
 from models import *
@@ -36,6 +37,7 @@ parser.add_argument("--smalldata",action="store_true")
 parser.add_argument("--unsupdata",default="")
 parser.add_argument("--trainaug",default="")
 parser.add_argument("--unsup-kd",action="store_true")
+parser.add_argument("--consistent-improve", action="store_true")
 parser.add_argument("--net", default="ResNet18")
 parser.add_argument("--lwf", action="store_true")
 parser.add_argument("--lwf-lambda", default=1.0)
@@ -63,6 +65,8 @@ transform_test = transforms.Compose([
 
 USE_CF = args.trainaug .find("CF")>=0
 USE_ADV = args.trainaug .find("ADV")>=0
+
+CON_IMPROVE = args.consistent_improve
 
 assert not args.unsup_kd or not args.correct_set
 # Crop Flip
@@ -197,6 +201,7 @@ class ImageClassTraining(VT):
         return model
     def pre_train(self):
         self.ewcs = {}
+        global ds_unsup
         if args.unsup_kd:
             self.dl_unsup = repeat_dataloader(self.process_data(ds_unsup, "test"))
         if USE_ADV:
@@ -261,12 +266,36 @@ class ImageClassTraining(VT):
                 compare_pairs.append(compare_pair[0])        
         print("current compare pairs", compare_pairs)   
         metric = self.taskdata.get_metric(self.curr_task_name)  
+        val = self.curr_val_data_loader
+        if CON_IMPROVE:
+            ## Make it larger if neccessary
+            prev_corr = [None] * 100
         for batch_idx, (oinputs, otargets) in enumerate(dataloader):
             #print(inputs.shape, targets.shape)
+            if CON_IMPROVE:
+                with PytorchModeWrap(model, False):
+                    f = True
+                    for idx, (x, y) in enumerate(val):
+                        x, y = x.to(device), y.to(device)
+                        output = model(x)
+                        mask = metric(output, {"x":None,"y":y},model)
+                        if prev_corr[idx] is None:
+                            prev_corr[idx] = mask
+                        f = f and torch.le(prev_corr[idx], mask)
+                        if not f:
+                            break
+                if f:
+                    prev_state = copy.deepcopy(net.state_dict())
+                else:
+                    net.load_state_dict(prev_state)
+                    
             oinputs, otargets = oinputs.to(device), otargets.to(device)
             if USE_ADV:
                 #print(oinputs.size())
                 oinputs = self.fgs.perturb(model, oinputs, model.process_labels(otargets),)
+            
+
+                    
             optimizer.zero_grad()
             loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
             loss.backward()
@@ -308,9 +337,15 @@ class ImageClassTraining(VT):
         print("eval loss", test_loss/total)
         return test_loss/total
 
-    def process_data(self, dataset, mode, batch_size=None, sampler=None, shuffle=True):
+    def process_data(self, dataset, mode, batch_size=None, sampler=None, shuffle=None):
         if batch_size is None:
             batch_size = 128
+        assert mode in ["train", "eval"]
+        if shuffle is None:
+            if mode == "train":
+                shuffle = True
+            else:
+                shuffle = False
         return torch.utils.data.DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle, num_workers=8, sampler=sampler, generator=torch.Generator().manual_seed(seed))
 
