@@ -99,6 +99,7 @@ if args.smalldata and args.unsup_kd:
 else:
     sup_method = ""
 
+
 proc_func = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
 
 trainset = ds(
@@ -135,6 +136,9 @@ set_config("reset_net_before_task", args.scratch)
 if args.scratch:
     method_name += "#scratch"
 
+if CON_IMPROVE:
+    method_name = "#improve_cp_step"
+
 if method_name == "":
     method_name = "#vanilla"
 set_config("develop_assumption", args.dev_scene)
@@ -146,7 +150,8 @@ def init_model():
     print('==> Building model..')
     # net = VGG('VGG19')
     torch.manual_seed(seed)
-    net =  ResNet18(procfunc=proc_func)
+    netdct = {"ResNet18":ResNet18, "ResNet34":ResNet34}
+    net =  netdct[args.net](procfunc=proc_func)
     os.makedirs("fix_init",exist_ok=True)
     cp_name = os.path.join("fix_init",ds_name + args.net+ str(seed))
     if os.path.exists(cp_name):
@@ -192,11 +197,15 @@ class ImageClassTraining(VT):
 
     def _model_process(self, task_name, model: nn.Module, key, step):
         if step == 0:
+            global optimizer
             if get_config_default("reset_head_before_task", False):
                 model.reset_head()
             if get_config("reset_net_before_task"):
                 init_model()
                 model = net
+            torch.manual_seed(seed)
+            optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-4)
+
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
         return model
     def pre_train(self):
@@ -266,36 +275,59 @@ class ImageClassTraining(VT):
                 compare_pairs.append(compare_pair[0])        
         print("current compare pairs", compare_pairs)   
         metric = self.taskdata.get_metric(self.curr_task_name)  
-        val = self.curr_val_data_loader
+        val = self.curr_val_data_loader[self.curr_task_name]
         if CON_IMPROVE:
             ## Make it larger if neccessary
             prev_corr = [None] * 100
+            prev_state = copy.deepcopy(model.state_dict())
+            prev_opt = copy.deepcopy(optimizer.state_dict())
+        if len(compare_pairs)>0:
+            prev_model = prev_models[compare_pairs[-1]]
+        def improve():
+            nonlocal model, val, prev_corr, prev_state, prev_opt
+            if CON_IMPROVE and len(compare_pairs)>0:
+                with torch.no_grad():
+                    _con_sum = 0
+                    _con_cnt = 0
+                    with PytorchModeWrap(model, False):
+                        f = True
+                        for idx, (x, y) in enumerate(val):
+                            #if idx>=5:
+                            #    break
+                            x, y = x.to(device), y.to(device)
+                            if prev_corr[idx] is None:
+                                output = prev_model(x)
+                                mask = metric(output, {"x":None,"y":y},prev_model)
+                                prev_corr[idx] = mask
+                                _con_sum += 1
+                                _con_cnt += 1
+                            else:
+                                output = model(x, full=True)
+                                output =prev_model.process_output(output)
+                                mask = metric(output, {"x":None,"y":y},model)                                
+                                _con_sum += torch.sum( mask * prev_corr[idx])
+                                #prev_corr[idx] = mask
+                                _con_cnt += torch.sum(prev_corr[idx])
+                        f = (_con_sum / _con_cnt) > 0.80
+                    if f:
+                        prev_state = copy.deepcopy(model.state_dict())
+                        prev_opt = copy.deepcopy(optimizer.state_dict())
+                        print("+",_con_sum / _con_cnt)
+                    else:
+                        print("-",_con_sum / _con_cnt)
+                        model.load_state_dict(prev_state)
+                        optimizer.load_state_dict(prev_opt)
         for batch_idx, (oinputs, otargets) in enumerate(dataloader):
             #print(inputs.shape, targets.shape)
-            if CON_IMPROVE:
-                with PytorchModeWrap(model, False):
-                    f = True
-                    for idx, (x, y) in enumerate(val):
-                        x, y = x.to(device), y.to(device)
-                        output = model(x)
-                        mask = metric(output, {"x":None,"y":y},model)
-                        if prev_corr[idx] is None:
-                            prev_corr[idx] = mask
-                        f = f and torch.le(prev_corr[idx], mask)
-                        if not f:
-                            break
-                if f:
-                    prev_state = copy.deepcopy(net.state_dict())
-                else:
-                    net.load_state_dict(prev_state)
-                    
+            improve()
+                #if batch_idx%10 == 0:
+                    #print(idx, prev_corr[0][:1])
+                    #print("mean", torch.mean(prev_corr[0].float()),torch.mean(mask) , f)
             oinputs, otargets = oinputs.to(device), otargets.to(device)
             if USE_ADV:
                 #print(oinputs.size())
                 oinputs = self.fgs.perturb(model, oinputs, model.process_labels(otargets),)
             
-
-                    
             optimizer.zero_grad()
             loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
             loss.backward()
@@ -308,6 +340,7 @@ class ImageClassTraining(VT):
             
             progress_bar(batch_idx, len(dataloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
                         % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+        improve()
         self.scheduler.step()
         print(len(prev_models), loss_penalty)
     def _eval_single(self, model, dataloader, prev_models, device, epoch):
@@ -352,6 +385,7 @@ class ImageClassTraining(VT):
 ICD = setting["taskdata"]
 epsp = EPSP(device, max_step= 25)
 seed = int(args.class_seed)
+
 
 if args.smalldata:
     ds_name = args.dataset + "_small"
