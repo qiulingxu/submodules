@@ -25,6 +25,7 @@ from cl import EvalProgressPerSampleClassification as EPSP, \
 from cl.configs.imageclass_config import incremental_config
 from cl.utils import PytorchModeWrap, get_config, get_config_default, save_config, set_config, repeat_dataloader
 from cl.algo import knowledge_distill_loss, EWC
+from cl.algo.torchensemble import SnapshotEnsembleClassifier, BaggingClassifier,  FastGeometricClassifier
 from torch.utils.data import ConcatDataset
 import cl
 from functools import partial
@@ -35,6 +36,7 @@ parser.add_argument('--resume', '-r', action='store_true',
 parser.add_argument("--dataset", default="cifar10")
 parser.add_argument("--smalldata",action="store_true")
 parser.add_argument("--unsupdata",default="")
+parser.add_argument("--ensemble", default="")
 parser.add_argument("--trainaug",default="")
 parser.add_argument("--unsup-kd",action="store_true")
 parser.add_argument("--consistent-improve", action="store_true")
@@ -65,6 +67,8 @@ transform_test = transforms.Compose([
 
 USE_CF = args.trainaug .find("CF")>=0
 USE_ADV = args.trainaug .find("ADV")>=0
+USE_ENSEMBLE = args.ensemble != ""
+assert args.ensemble in ["snapshot", "bagging"]
 
 CON_IMPROVE = args.consistent_improve
 
@@ -120,7 +124,13 @@ print(type(trainset),type(testset),type(trainset+testset))
 lwf = args.lwf
 ewc = args.ewc
 method_name = ""
-
+if USE_ENSEMBLE:
+    method_name += "#ensemble_5_{}".format(args.ensemble)
+    granularity = "epoch"
+    is_copy = False
+else:
+    granularity = "converge"
+    is_copy = True
 if lwf:
     set_config("lwf_lambda", args.lwf_lambda)
     method_name += "#lwf{:.2e}".format(args.lwf_lambda)
@@ -200,13 +210,19 @@ class ImageClassTraining(VT):
             global optimizer
             if get_config_default("reset_head_before_task", False):
                 model.reset_head()
-            if get_config("reset_net_before_task"):
+            if get_config("reset_net_before_task") or USE_ENSEMBLE:
                 init_model()
                 model = net
             torch.manual_seed(seed)
             optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-4)
 
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+            if USE_ENSEMBLE:
+                model = SnapshotEnsembleClassifier(model, 5)
+                lr = 1e-1
+                weight_decay = 5e-4
+                momentum = 0.9
+                model.set_optimizer("SGD", lr=lr, weight_decay=weight_decay, momentum=momentum)
         return model
     def pre_train(self):
         self.ewcs = {}
@@ -317,32 +333,49 @@ class ImageClassTraining(VT):
                         print("-",_con_sum / _con_cnt)
                         model.load_state_dict(prev_state)
                         optimizer.load_state_dict(prev_opt)
-        for batch_idx, (oinputs, otargets) in enumerate(dataloader):
-            #print(inputs.shape, targets.shape)
-            improve()
-                #if batch_idx%10 == 0:
-                    #print(idx, prev_corr[0][:1])
-                    #print("mean", torch.mean(prev_corr[0].float()),torch.mean(mask) , f)
-            oinputs, otargets = oinputs.to(device), otargets.to(device)
-            if USE_ADV:
-                #print(oinputs.size())
-                oinputs = self.fgs.perturb(model, oinputs, model.process_labels(otargets),)
-            
-            optimizer.zero_grad()
-            loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
-            loss.backward()
-            optimizer.step()
+        if USE_ENSEMBLE:
+            val = self.curr_val_data_loader[self.curr_task_name]
+            if args.ensemble == "snapshot":
+                epochs = 200
+                
+                model.fit(
+                    dataloader,
+                    epochs=epochs,
+                    test_loader=val,
+                )
+            elif args.ensemble == "bagging":
+                assert False
+            else:
+                assert False
+        else:
+            for batch_idx, (oinputs, otargets) in enumerate(dataloader):
+                #print(inputs.shape, targets.shape)
+                improve()
+                    #if batch_idx%10 == 0:
+                        #print(idx, prev_corr[0][:1])
+                        #print("mean", torch.mean(prev_corr[0].float()),torch.mean(mask) , f)
+                oinputs, otargets = oinputs.to(device), otargets.to(device)
+                if USE_ADV:
+                    #print(oinputs.size())
+                    oinputs = self.fgs.perturb(model, oinputs, model.process_labels(otargets),)
+                
+                optimizer.zero_grad()
+                loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
+                loss.backward()
+                optimizer.step()
 
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-            
-            progress_bar(batch_idx, len(dataloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                        % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
-        improve()
-        self.scheduler.step()
-        print(len(prev_models), loss_penalty)
+                train_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+                
+                progress_bar(batch_idx, len(dataloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
+                            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+            improve()
+            self.scheduler.step()
+            print(len(prev_models), loss_penalty)
+
+
     def _eval_single(self, model, dataloader, prev_models, device, epoch):
         model.eval()
         test_loss = 0
@@ -420,8 +453,8 @@ ic = ICD(ds, evaluator=epsp, metric =  MC(), segment_random_seed=seed,
             **IC_PARAM)
 
 
-train_cls = ImageClassTraining(max_epoch=200, granularity="converge",\
-        evalulator=epsp, taskdata=ic,task_prefix="cifar10_vanilla") #
+train_cls = ImageClassTraining(max_epoch=200, granularity=granularity,\
+        evalulator=epsp, taskdata=ic,task_prefix="cifar10_vanilla", iscopy =is_copy) #
 
 
 train_cls.controlled_train_single_task(net)
