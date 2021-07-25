@@ -21,7 +21,8 @@ from cl import EvalProgressPerSampleClassification as EPSP, \
     MetricClassification as MC, \
     ClassificationTrain as VT, \
     ClassificationMask as CM, \
-    FastGradientSign as FGS
+    FastGradientSign as FGS,\
+    AvgNet
 from cl.configs.imageclass_config import incremental_config
 from cl.utils import PytorchModeWrap, get_config, get_config_default, save_config, set_config, repeat_dataloader
 from cl.algo import knowledge_distill_loss, EWC
@@ -37,6 +38,7 @@ parser.add_argument("--dataset", default="cifar10")
 parser.add_argument("--smalldata",action="store_true")
 parser.add_argument("--unsupdata",default="")
 parser.add_argument("--ensemble", default="")
+parser.add_argument("--hist-avg",action="store_true")
 parser.add_argument("--trainaug",default="")
 parser.add_argument("--unsup-kd",action="store_true")
 parser.add_argument("--consistent-improve", action="store_true")
@@ -68,7 +70,8 @@ transform_test = transforms.Compose([
 USE_CF = args.trainaug .find("CF")>=0
 USE_ADV = args.trainaug .find("ADV")>=0
 USE_ENSEMBLE = args.ensemble != ""
-assert args.ensemble in ["snapshot", "bagging"]
+HIST_AVG = args.hist_avg
+assert args.ensemble in ["snapshot", "bagging", ""]
 
 CON_IMPROVE = args.consistent_improve
 
@@ -145,7 +148,8 @@ if ewc:
 set_config("reset_net_before_task", args.scratch)
 if args.scratch:
     method_name += "#scratch"
-
+if HIST_AVG:
+    method_name += "#hist_avg"
 if CON_IMPROVE:
     method_name = "#improve_cp_step"
 
@@ -224,8 +228,20 @@ class ImageClassTraining(VT):
                 momentum = 0.9
                 model.set_optimizer("SGD", lr=lr, weight_decay=weight_decay, momentum=momentum)
         return model
+
+    def process_model4eval(self, modeldct):
+        
+        if HIST_AVG:
+            
+            self.avg_model.add_net(modeldct[self.curr_task_name])
+            return {self.curr_task_name:self.avg_model}
+        else:
+            return modeldct
+
     def pre_train(self):
         self.ewcs = {}
+        if HIST_AVG:
+            self.avg_model = AvgNet() 
         global ds_unsup
         if args.unsup_kd:
             self.dl_unsup = repeat_dataloader(self.process_data(ds_unsup, "test"))
@@ -239,6 +255,8 @@ class ImageClassTraining(VT):
             _ewc.set_model(self.last_model[self.curr_task_name], self.task_var[self.curr_task_name])
             _ewc.eval_fisher()
             self.ewcs[self.curr_order] = _ewc
+        
+
 
     def calculate_loss(self, oinputs, otargets, model, compare_pairs, prev_models, metric):
         outputs_full = model(oinputs, full=True)
