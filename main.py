@@ -1,5 +1,6 @@
 '''Train CIFAR10 with PyTorch.'''
 from numpy import full
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -34,6 +35,7 @@ parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true',
                     help='resume from checkpoint')
+parser.add_argument('--interpolate', action='store_true')
 parser.add_argument("--dataset", default="cifar10")
 parser.add_argument("--smalldata",action="store_true")
 parser.add_argument("--unsupdata",default="")
@@ -150,6 +152,9 @@ if args.scratch:
     method_name += "#scratch"
 if HIST_AVG:
     method_name += "#hist_avg"
+if args.interpolate:
+    method_name += "#interpolate"
+    set_config("ic_parameter",{"segments":3,"batch_size":128})
 if CON_IMPROVE:
     method_name = "#improve_cp_step"
 
@@ -230,7 +235,12 @@ class ImageClassTraining(VT):
         return model
 
     def process_model4eval(self, modeldct):
-        
+        if args.interpolate and self.last_model is not None:
+            for alpha in np.arange(0.1,1.0,step=0.1):
+                avg_model = AvgNet()
+                avg_model.add_net(modeldct[self.curr_task_name], weight = alpha)
+                avg_model.add_net(self.last_model[self.curr_task_name], weight = 1 - alpha)
+                self.evaluator.eval({self.curr_task_name:avg_model})
         if HIST_AVG:
             
             self.avg_model.add_net(modeldct[self.curr_task_name])
