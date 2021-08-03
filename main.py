@@ -2,6 +2,7 @@
 from numpy import full
 import numpy as np
 import torch
+import torch as T
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -29,6 +30,7 @@ from cl.utils import PytorchModeWrap, get_config, get_config_default, save_confi
 from cl.algo import knowledge_distill_loss, EWC
 from cl.algo.torchensemble import SnapshotEnsembleClassifier, BaggingClassifier,  FastGeometricClassifier
 from torch.utils.data import ConcatDataset
+from cl.dataset.imagenet32 import Imagenet32
 import cl
 from functools import partial
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
@@ -42,18 +44,21 @@ parser.add_argument("--unsupdata",default="")
 parser.add_argument("--ensemble", default="")
 parser.add_argument("--hist-avg",action="store_true")
 parser.add_argument("--trainaug",default="")
+parser.add_argument("--dist-weight",default="")
 parser.add_argument("--unsup-kd",action="store_true")
 parser.add_argument("--consistent-improve", action="store_true")
 parser.add_argument("--net", default="ResNet18")
 parser.add_argument("--lwf", action="store_true")
-parser.add_argument("--lwf-lambda", default=1.0)
+parser.add_argument("--lwf-lambda", default=1.0, type=float)
 parser.add_argument("--scratch", action="store_true")
 parser.add_argument("--ewc", action="store_true")
 parser.add_argument("--ewc-lambda", default=5000.0)
+parser.add_argument("--max-epoch", default=200,type=int)
 parser.add_argument("--dev-scene", default="sequential")
 parser.add_argument("--inc-setting", default="domain_inc")
 parser.add_argument("--class-seed", default=0)
 parser.add_argument("--correct-set", action="store_true")
+parser.add_argument("--seploss", action="store_true")
 parser.add_argument("--skip-exist",action="store_true")
 args = parser.parse_args()
 
@@ -64,7 +69,7 @@ start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 # Data
 print('==> Preparing data..')
 assert args.trainaug in ["", "CF", "ADV","CF_ADV"]
-
+assert args.dataset in ["cifar10", "cifar100", "imagenet32"]
 transform_test = transforms.Compose([
     transforms.ToTensor(),
 ])
@@ -73,8 +78,12 @@ USE_CF = args.trainaug .find("CF")>=0
 USE_ADV = args.trainaug .find("ADV")>=0
 USE_ENSEMBLE = args.ensemble != ""
 HIST_AVG = args.hist_avg
+DIST_WEIGHT = args.dist_weight != ""
 assert args.ensemble in ["snapshot", "bagging", ""]
-
+assert args.dist_weight in ["I_normalized_l2", "I_normalized_l2_cap", "normalized_l2", ""]
+DIST_WEIGHT_INV = args.dist_weight.find("I_")>=0
+DIST_WEIGHT_NORMALIZE = args.dist_weight.find("normalized")>=0
+DIST_WEIGHT_CAP = args.dist_weight.find("cap")>=0
 CON_IMPROVE = args.consistent_improve
 
 assert not args.unsup_kd or not args.correct_set
@@ -97,6 +106,8 @@ if args.dataset == "cifar10":
     ds = torchvision.datasets.CIFAR10
 elif args.dataset == "cifar100":
     ds = torchvision.datasets.CIFAR100
+elif args.dataset == "imagenet32":
+    ds = Imagenet32
 
 if args.smalldata and args.unsup_kd:
     if args.unsupdata == "":
@@ -108,16 +119,21 @@ if args.smalldata and args.unsup_kd:
 else:
     sup_method = ""
 
+if args.dataset in ["cifar10", "cifar100"]:
+    proc_func = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    download = True
+elif args.dataset in ["imagenet32"]:
+    download = False
+    proc_func = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
-proc_func = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
 
 trainset = ds(
-    root='./data', train=True, download=True)#, transform=transform_train)
+    root='./data', train=True, download=download)#, transform=transform_train)
 trainloader = torch.utils.data.DataLoader(
     trainset, batch_size=128, shuffle=True, num_workers=8)
 
 testset = ds(
-    root='./data', train=False, download=True)#, transform=transform_test)
+    root='./data', train=False, download=download)#, transform=transform_test)
 testloader = torch.utils.data.DataLoader(
     testset, batch_size=100, shuffle=False, num_workers=8)
 
@@ -136,6 +152,7 @@ if USE_ENSEMBLE:
 else:
     granularity = "converge"
     is_copy = True
+assert not DIST_WEIGHT or not args.seploss
 if lwf:
     set_config("lwf_lambda", args.lwf_lambda)
     method_name += "#lwf{:.2e}".format(args.lwf_lambda)
@@ -143,11 +160,16 @@ if lwf:
         method_name += "_unsup"
     if args.correct_set:
         method_name += "#corrset"
+    if args.seploss:
+        method_name += "#seploss"        
 if ewc:
     set_config("ewc_lambda", args.ewc_lambda)
     method_name += "#ewc{:.2e}".format(args.ewc_lambda)
     #set_config("reset_head_before_task", True)
 set_config("reset_net_before_task", args.scratch)
+if DIST_WEIGHT:
+    method_name += args.dist_weight
+
 if args.scratch:
     method_name += "#scratch"
 if HIST_AVG:
@@ -169,7 +191,7 @@ def init_model():
     print('==> Building model..')
     # net = VGG('VGG19')
     torch.manual_seed(seed)
-    netdct = {"ResNet18":ResNet18, "ResNet34":ResNet34}
+    netdct = {"ResNet18":ResNet18, "ResNet34":ResNet34, "ResNet152":ResNet152,"LeNet":CLeNet}
     net =  netdct[args.net](procfunc=proc_func)
     os.makedirs("fix_init",exist_ok=True)
     cp_name = os.path.join("fix_init",ds_name + args.net+ str(seed))
@@ -205,7 +227,7 @@ def init_model():
         best_acc = checkpoint['acc']
         start_epoch = checkpoint['epoch']
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(reduction="none")
     #optimizer = optim.SGD(net.parameters(), lr=args.lr,
     #                    momentum=0.9, weight_decay=5e-4)
     torch.manual_seed(seed)
@@ -254,14 +276,14 @@ class ImageClassTraining(VT):
             self.avg_model = AvgNet() 
         global ds_unsup
         if args.unsup_kd:
-            self.dl_unsup = repeat_dataloader(self.process_data(ds_unsup, "test"))
+            self.dl_unsup = repeat_dataloader(self.process_data(ds_unsup, "eval"))
         if USE_ADV:
             self.fgs = FGS(epsilon=1.0/255,alpha = 1.0/4/255, min_val = 0.0, max_val = 1.0, max_iters = 8)
             
 
     def post_task(self):
         if ewc:
-            _ewc = EWC(self.curr_train_data[self.curr_task_name], to_data_loader=partial(self.process_data, mode="test"))
+            _ewc = EWC(self.curr_train_data[self.curr_task_name], to_data_loader=partial(self.process_data, mode="eval"))
             _ewc.set_model(self.last_model[self.curr_task_name], self.task_var[self.curr_task_name])
             _ewc.eval_fisher()
             self.ewcs[self.curr_order] = _ewc
@@ -272,10 +294,12 @@ class ImageClassTraining(VT):
         outputs_full = model(oinputs, full=True)
         outputs = model.process_output(outputs_full)
         targets = model.process_labels(otargets)
-        loss = criterion(outputs, targets)
+
+        
         loss_penalty = 0
+        sample_weight = T.ones_like(targets)
         if len(compare_pairs) > 0:
-            if lwf and len(prev_models)>0:
+            if (lwf or DIST_WEIGHT) and len(prev_models)>0:
                 ### We use test mode to calculate for knowlege distillation loss
                 with PytorchModeWrap(model, False):
                     outputs = model.process_output(outputs_full)
@@ -284,24 +308,45 @@ class ImageClassTraining(VT):
                         prev_full = prev_models[k](oinputs, full=True)
                         prev_output = prev_models[k].process_output(prev_full)
                         #bug? use full instead of processing output for metric
-                        if args.correct_set:
-                            mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
-                        else:
-                            mask = None
-                        if args.unsup_kd:
-                            x_unsup, _ = next(self.dl_unsup)
-                            x_kd = x_unsup.to(device)
-                            kd_output = model(x_kd, full=True)
-                            kd_prev_output = prev_models[k](x_kd, full=True)
-                        else:
-                            kd_output = outputs_full
-                            kd_prev_output = prev_full
-                        klg_loss = knowledge_distill_loss(kd_output, kd_prev_output, prev_models[k], mask=mask)
-                        loss_penalty += klg_loss
+                        if lwf:
+                            if args.correct_set:
+                                mask = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
+                            else:
+                                mask = None
+                            if args.unsup_kd:
+                                x_unsup, _ = next(self.dl_unsup)
+                                x_kd = x_unsup.to(device)
+                                kd_output = model(x_kd, full=True)
+                                kd_prev_output = prev_models[k](x_kd, full=True)
+                            else:
+                                kd_output = outputs_full
+                                kd_prev_output = prev_full
+                            if args.seploss:
+                                mask_prev = metric(prev_output, {"x":None,"y":otargets},prev_models[k])
+                                mask_now = metric(outputs, {"x":None,"y":otargets},model)
+                                mask = mask_prev * (1-mask_now)  # previously correct / now incorrect ones
+                                sample_weight = (1- mask) 
+                                sample_weight = sample_weight * sample_weight.size(0) / (T.sum(sample_weight) + 1e-2)
+                            klg_loss = knowledge_distill_loss(kd_output, kd_prev_output, prev_models[k], mask=mask)
+                            loss_penalty += klg_loss
+                        if DIST_WEIGHT:
+                            _dist = T.sqrt(T.sum(T.square(prev_output - outputs), dim=1))
+                            if DIST_WEIGHT_INV:
+                                _dist = 1.0 / ( _dist + 1e-2)
+                            if DIST_WEIGHT_NORMALIZE:
+                                avg = T.mean(_dist)  
+                                _dist = _dist / avg
+                            if DIST_WEIGHT_CAP:
+                                _dist = T.minimum(T.ones_like(_dist), _dist)
+                            sample_weight = _dist.detach()
+
             if ewc and len(prev_models)>0:
                 for k in compare_pairs:
                     loss_penalty += self.ewcs[k].penalty(model)#.module)
             loss_penalty /= len(compare_pairs)
+
+        loss = criterion(outputs, targets)
+        loss = T.mean(loss * sample_weight)
         loss += loss_penalty
         return loss, loss_penalty, outputs, targets
 
@@ -364,7 +409,7 @@ class ImageClassTraining(VT):
         if USE_ENSEMBLE:
             val = self.curr_val_data_loader[self.curr_task_name]
             if args.ensemble == "snapshot":
-                epochs = 200
+                epochs = args.max_epoch
                 
                 model.fit(
                     dataloader,
@@ -434,7 +479,7 @@ class ImageClassTraining(VT):
     def process_data(self, dataset, mode, batch_size=None, sampler=None, shuffle=None):
         if batch_size is None:
             batch_size = 128
-        assert mode in ["train", "eval"]
+        assert mode in ["train", "eval", "test"]
         if shuffle is None:
             if mode == "train":
                 shuffle = True
@@ -444,7 +489,7 @@ class ImageClassTraining(VT):
             dataset, batch_size=batch_size, shuffle=shuffle, num_workers=8, sampler=sampler, generator=torch.Generator().manual_seed(seed))
 
 ICD = setting["taskdata"]
-epsp = EPSP(device, max_step= 25)
+epsp = EPSP(device, max_step=  get_config("ic_parameter")["segments"])
 seed = int(args.class_seed)
 
 
@@ -452,7 +497,7 @@ if args.smalldata:
     ds_name = args.dataset + "_small"
 else:
     ds_name = args.dataset
-full_name = "{}{}_{}_{:.1e}_{}{}_{}_FixInit".format(ds_name, Daug_method, args.net, args.lr, method_name, sup_method, get_config("full_name"))
+full_name = "{}{}_{}_{:.1e}_{}{}_{}_Ep{}_FixInit".format(ds_name, Daug_method, args.net, args.lr, method_name, sup_method, get_config("full_name"), args.max_epoch)
 path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
 if args.skip_exist:
     if  os.path.exists(path + "_config.json"):
@@ -466,7 +511,11 @@ IC_PARAM = get_config("ic_parameter")
 print(cl.utils.config)
 ds = ConcatDataset([trainset,testset])
 if args.smalldata:
-    ds, ds_remained = torch.utils.data.random_split(ds, [10000, 50000], generator=torch.Generator().manual_seed(seed))
+    if args.dataset in ["cifar10", "cifar100"]:
+        ds, ds_remained = torch.utils.data.random_split(ds, [10000, 50000], generator=torch.Generator().manual_seed(seed))
+    else:
+        ds, ds_remained, _ = torch.utils.data.random_split(ds, [200000, 200000, len(ds)- 400000], generator=torch.Generator().manual_seed(seed))
+
 if args.unsup_kd:
     if args.unsupdata == "":
         ds_unsup  = ds_remained
@@ -481,7 +530,7 @@ ic = ICD(ds, evaluator=epsp, metric =  MC(), segment_random_seed=seed,
             **IC_PARAM)
 
 
-train_cls = ImageClassTraining(max_epoch=200, granularity=granularity,\
+train_cls = ImageClassTraining(max_epoch=args.max_epoch, granularity=granularity,\
         evalulator=epsp, taskdata=ic,task_prefix="cifar10_vanilla", iscopy =is_copy) #
 
 
