@@ -40,6 +40,7 @@ parser.add_argument('--resume', '-r', action='store_true',
 parser.add_argument('--interpolate', action='store_true')
 parser.add_argument("--dataset", default="cifar10")
 parser.add_argument("--smalldata",action="store_true")
+parser.add_argument("--mix-label", default="",choices=["avg", ""])
 parser.add_argument("--unsupdata",default="")
 parser.add_argument("--ensemble", default="")
 parser.add_argument("--hist-avg",action="store_true")
@@ -49,6 +50,7 @@ parser.add_argument("--unsup-kd",action="store_true")
 parser.add_argument("--consistent-improve", action="store_true")
 parser.add_argument("--net", default="ResNet18")
 parser.add_argument("--lwf", action="store_true")
+parser.add_argument("--loss",default="xent", choices=["l1","xent"])
 parser.add_argument("--lwf-lambda", default=1.0, type=float)
 parser.add_argument("--scratch", action="store_true")
 parser.add_argument("--ewc", action="store_true")
@@ -56,6 +58,7 @@ parser.add_argument("--ewc-lambda", default=5000.0)
 parser.add_argument("--max-epoch", default=200,type=int)
 parser.add_argument("--dev-scene", default="sequential")
 parser.add_argument("--inc-setting", default="domain_inc")
+parser.add_argument("--warmup-ep",default = 0, type=int)
 parser.add_argument("--class-seed", default=0)
 parser.add_argument("--correct-set", action="store_true")
 parser.add_argument("--seploss", action="store_true")
@@ -85,6 +88,13 @@ DIST_WEIGHT_INV = args.dist_weight.find("I_")>=0
 DIST_WEIGHT_NORMALIZE = args.dist_weight.find("normalized")>=0
 DIST_WEIGHT_CAP = args.dist_weight.find("cap")>=0
 CON_IMPROVE = args.consistent_improve
+MIX_LABEL = (args.mix_label != "")
+WARMUP = (args.warmup_ep != 0)
+
+# for one hot encoding
+def categorical_cross_entropy(y_pred, y_true):
+    y_pred = torch.clamp(y_pred, 1e-9, 1 - 1e-9)
+    return -(y_true * torch.log(y_pred)).sum(dim=1)
 
 assert not args.unsup_kd or not args.correct_set
 # Crop Flip
@@ -161,7 +171,11 @@ if lwf:
     if args.correct_set:
         method_name += "#corrset"
     if args.seploss:
-        method_name += "#seploss"        
+        method_name += "#seploss"   
+if args.loss != "xent":
+    method_name += "#loss{}".format(args.loss)    
+if WARMUP:
+    method_name += "Warmupep{}".format(args.warmup_ep) 
 if ewc:
     set_config("ewc_lambda", args.ewc_lambda)
     method_name += "#ewc{:.2e}".format(args.ewc_lambda)
@@ -170,6 +184,8 @@ set_config("reset_net_before_task", args.scratch)
 if DIST_WEIGHT:
     method_name += args.dist_weight
 
+if MIX_LABEL:
+    method_name += "#mixL_{}".format(args.mix_label)
 if args.scratch:
     method_name += "#scratch"
 if HIST_AVG:
@@ -226,8 +242,12 @@ def init_model():
         net.load_state_dict(checkpoint['net'])
         best_acc = checkpoint['acc']
         start_epoch = checkpoint['epoch']
-
-    criterion = nn.CrossEntropyLoss(reduction="none")
+    if args.loss == "xent":
+        criterion = nn.CrossEntropyLoss(reduction="none")
+    else:
+        c = nn.L1Loss(reduction="none")
+        def criterion(output, label):
+            return T.mean(c(F.softmax(output, dim=1), T.eye(get_config("CLASS_NUM"))[label].to(device)),dim=1)
     #optimizer = optim.SGD(net.parameters(), lr=args.lr,
     #                    momentum=0.9, weight_decay=5e-4)
     torch.manual_seed(seed)
@@ -290,7 +310,7 @@ class ImageClassTraining(VT):
         
 
 
-    def calculate_loss(self, oinputs, otargets, model, compare_pairs, prev_models, metric):
+    def calculate_loss(self, oinputs, otargets, elemorder, model, compare_pairs, prev_models, metric, epoch):
         outputs_full = model(oinputs, full=True)
         outputs = model.process_output(outputs_full)
         targets = model.process_labels(otargets)
@@ -344,8 +364,25 @@ class ImageClassTraining(VT):
                 for k in compare_pairs:
                     loss_penalty += self.ewcs[k].penalty(model)#.module)
             loss_penalty /= len(compare_pairs)
-
-        loss = criterion(outputs, targets)
+        if MIX_LABEL and len(compare_pairs) > 0:
+            with PytorchModeWrap(model, False):   
+                one_hot_prob = T.eye(get_config("CLASS_NUM"))[targets].to(device)               
+                for k in compare_pairs:
+                    prev_full = prev_models[k](oinputs, full=True)
+                    prev_output = prev_models[k].process_output(prev_full)
+                    one_hot_prob += F.softmax(prev_output,dim=1)
+                one_hot_prob /= len(compare_pairs)+ 1
+                one_hot_prob = one_hot_prob.detach()
+            if args.mix_label == "avg":
+                loss = categorical_cross_entropy(F.softmax(outputs),one_hot_prob)
+            else:
+                assert False
+        else:
+            loss = criterion(outputs, targets)
+        if WARMUP and len(compare_pairs) > 0:
+            warmup_sample_weight = T.where(elemorder.eq(self.curr_order_index), T.ones_like(targets) / args.warmup_ep * (epoch+1),  T.ones_like(targets) )
+            warmup_sample_weight = T.clamp(warmup_sample_weight,0.0, 1.0)
+            sample_weight = warmup_sample_weight
         loss = T.mean(loss * sample_weight)
         loss += loss_penalty
         return loss, loss_penalty, outputs, targets
@@ -421,7 +458,7 @@ class ImageClassTraining(VT):
             else:
                 assert False
         else:
-            for batch_idx, (oinputs, otargets) in enumerate(dataloader):
+            for batch_idx, (oinputs, otargets, elemorder) in enumerate(dataloader):
                 #print(inputs.shape, targets.shape)
                 improve()
                     #if batch_idx%10 == 0:
@@ -433,7 +470,7 @@ class ImageClassTraining(VT):
                     oinputs = self.fgs.perturb(model, oinputs, model.process_labels(otargets),)
                 
                 optimizer.zero_grad()
-                loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
+                loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, elemorder, model, compare_pairs, prev_models, metric, epoch)
                 loss.backward()
                 optimizer.step()
 
