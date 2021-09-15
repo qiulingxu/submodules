@@ -13,19 +13,13 @@ def run_cmd(device, trial, arg=None):
         args = " ".join(sys.argv[1:])
     else:
         args = arg
-    cmd = 'CUDA_VISIBLE_DEVICES={} python ./main.py {} --class-seed={} --skip-exist'\
-        .format(device, args, trial)
+    cmd = 'CUDA_VISIBLE_DEVICES={} python ./main.py {} --class-seed={} '\
+        .format(device, args, trial) #--skip-exist
     print(cmd)
     os.system(cmd)
 
-args = [#"""--dataset="cifar10" --ewc --inc-setting="data_inc"  """,
-        """--dataset="cifar10" --lwf --inc-setting="data_inc" """,
-        #"""--dataset="cifar10" --inc-setting="data_inc" """,
-        """--dataset="cifar10" --lwf --inc-setting="domain_inc" """,]
-        #"""--dataset="cifar10" --inc-setting="domain_inc" """,
-        #"""--dataset="cifar10" --ewc --inc-setting="domain_inc" """,]
-        #] 
 args = []
+
 for ds in ["imagenet32"]:
     for set in ["data_inc"]:#,"domain_inc"]:#"domain_inc", ]:
         for option1 in ["--lr=0.001 --smalldata"]:
@@ -38,7 +32,6 @@ for ds in ["imagenet32"]:
                     args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
                             format(ds, set, method, option1, option2))
 
-args = []
 for ds in ["imagenet32"]:
     for set in ["data_inc"]:#,"domain_inc"]:#"domain_inc", ]:
         for option1 in ["--lr=0.001 --smalldata"]:
@@ -58,20 +51,30 @@ for ds in ["cifar10"]:
                         args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
                             format(ds, set, method, option1, option2))
 
+args = []
 for ds in ["cifar10"]:
     for set in ["data_inc"]:#,"domain_inc"]:#"domain_inc", ]:
-        for option1 in ["--lr=0.001"]:
-            for method in ["--lwf", "--ewc", "", "--scratch", "--lwf --correct-set" ]:#
-                for option2 in ["--trainaug='CF'", ""]: #
+        for option1 in ["--lr=0.001 --small"]:
+            for method in ["--lwf", "--ewc", "", "--scratch", "--loss=l1", "--loss=l1_xent", "--ensemble='snapshot'"]:#
+                for option2 in [ ""]: #
                     break
                     args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
                             format(ds, set, method, option1, option2))
-            for method in [""]:
-                for option2 in [ "--trainaug='ADV'"]: # "--trainaug='CF_ADV'",
-                    break
+            for method in ["--lwf"]:
+                for st1 in [1,0.5,2,0.25,4]: #
+                    for st2 in [1,0.5,2,0.25,4]: #
+                        break
+                        option2 = "--var-kd=\"{}\" --max-epoch=100".format(str([st1, st2]))
+                        args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
+                                format(ds, set, method, option1, option2))
+args = []
+for ds in ["cifar10"]:#,"imagenet32"]:
+    for set in ["data_inc"]:  # ,"domain_inc"]:#"domain_inc", ]:
+        for option1 in ["--lr=0.1 --opt=sgd --small"]:
+            for method in ["--ensemble='snapshot' "]:#"--lwf", "--lwf --ensemble='snapshot'", "--ensemble='snapshot'"]:
+                for option2 in ["--segment=2", "--segment=4"]:
                     args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
-                        format(ds, set, method, option1, option2))
-
+                                format(ds, set, method, option1, option2))
 
 for ds in ["cifar10"]:
     for set in ["data_inc"]:#"domain_inc", ]:
@@ -88,6 +91,8 @@ for ds in ["cifar10"]:
                     break
                     args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
                         format(ds, set, method, option1, option2))
+
+# python eval_model.py --lr=0.1 --ensemble='snapshot' --opt=sgd --small --dataset="cifar10" --inc-setting="data_inc"  --model-path = "cifar10_small#Aug_CF_ResNet18_1.0e-01_#ensemble_5_snapshot_Optsgd_DScifar10_CIMmask_CTdata_inc_DAsequential_CvgS40_DomS2_Ep200_FixInit_0_0.pth"                  
 Num = 8
 results = []
 p = Pool(Num)
@@ -95,7 +100,7 @@ for k in range(len(args)):
     for t in range(1):
         while True:
             try:        
-                deviceID = GPUtil.getFirstAvailable(order = 'first', maxLoad=0.1, maxMemory=0.1, attempts=1, interval=60, verbose=False)[0]
+                deviceID = GPUtil.getFirstAvailable(order = 'first', maxLoad=0.2, maxMemory=0.5, attempts=1, interval=60, verbose=False)[0]
                 break
             except:
                 pass

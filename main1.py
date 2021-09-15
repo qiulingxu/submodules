@@ -15,7 +15,9 @@ import argparse
 from models import *
 from utils import progress_bar
 from cl import EvalProgressPerSample as EPSP, FixDataMemoryBatchClassification as FD, MetricClassification as MC
+from cl.utils import set_config
 
+set_config("CLASS_NUM",10)
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
@@ -54,12 +56,7 @@ testloader = torch.utils.data.DataLoader(
 classes = ('plane', 'car', 'bird', 'cat', 'deer',
            'dog', 'frog', 'horse', 'ship', 'truck')
 
-fd_train = FD(256)
-fd_train.feed_data(trainset)
-fd_test = FD(256)
-fd_test.feed_data(testset)
 
-# Model
 print('==> Building model..')
 # net = VGG('VGG19')
 net = ResNet18()
@@ -84,7 +81,6 @@ if device == 'cuda':
 
 
 
-epsp = EPSP(net, fd_train, MC(), device="cuda",)
 
 if args.resume:
     # Load checkpoint.
@@ -107,9 +103,7 @@ def train(epoch):
     net.train()
     train_loss = 0
     correct = 0
-    total = 0
-    epsp.eval()                     
-    epsp.getincorr()    
+    total = 0 
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
@@ -158,7 +152,7 @@ def test(epoch):
         }
         if not os.path.isdir('checkpoint'):
             os.mkdir('checkpoint')
-        torch.save(state, './checkpoint/ckpt.pth')
+        torch.save(state, './checkpoint/single.pth')
         best_acc = acc
 
 

@@ -56,7 +56,6 @@ parser.add_argument("--loss",default="xent", choices=["l1","xent", "l1_xent"])
 parser.add_argument("--lwf-lambda", default=1.0, type=float)
 parser.add_argument("--scratch", action="store_true")
 parser.add_argument("--ewc", action="store_true")
-parser.add_argument("--ensemble-num",default=5,type=int)
 parser.add_argument("--ewc-lambda", default=5000.0)
 parser.add_argument("--max-epoch", default=200,type=int)
 parser.add_argument("--dev-scene", default="sequential")
@@ -70,6 +69,7 @@ parser.add_argument("--seploss", action="store_true")
 parser.add_argument("--train-ext",action="store_true")
 parser.add_argument("--opt",default="sgd")
 parser.add_argument("--skip-exist",action="store_true")
+parser.add_argument("--model-path",type=str,)
 args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -168,7 +168,7 @@ lwf = args.lwf
 ewc = args.ewc
 method_name = ""
 if USE_ENSEMBLE:
-    method_name += "#ensemble_{}_{}".format(args.ensemble_num,args.ensemble)
+    method_name += "#ensemble_5_{}".format(args.ensemble)
     granularity = "epoch"
     is_copy = False
 else:
@@ -308,279 +308,42 @@ class ImageClassTraining(VT):
 
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_epoch)
             if USE_ENSEMBLE:
-                model = SnapshotEnsembleClassifier(model, args.ensemble_num)
+                model = SnapshotEnsembleClassifier(model, 5)
                 lr = args.lr
                 weight_decay = 5e-4
                 momentum = 0.9
                 model.set_optimizer("SGD", lr=lr, weight_decay=weight_decay, momentum=momentum)
+                for i in range(5):
+                    model.estimators_.append(model._make_estimator())
         return model
-
-    def process_model4eval(self, modeldct):
-        if args.interpolate and self.last_model is not None:
-            for alpha in np.arange(0.1,1.0,step=0.1):
-                avg_model = AvgNet()
-                avg_model.add_net(modeldct[self.curr_task_name], weight = alpha)
-                avg_model.add_net(self.last_model[self.curr_task_name], weight = 1 - alpha)
-                self.evaluator.eval({self.curr_task_name:avg_model})
-        if HIST_AVG:
-            self.avg_model.add_net(modeldct[self.curr_task_name])
-            return {self.curr_task_name:self.avg_model}
-        else:
-            return modeldct
-
-    def pre_train(self):
-        self.ewcs = {}
-        if HIST_AVG:
-            self.avg_model = AvgNet() 
-        global ds_unsup
-        if args.unsup_kd:
-            self.dl_unsup = repeat_dataloader(self.process_data(ds_unsup, "eval"))
-        if USE_ADV:
-            self.fgs = FGS(epsilon=1.0/255,alpha = 1.0/4/255, min_val = 0.0, max_val = 1.0, max_iters = 8)
-        if VAR_KD:
-            var_kd = eval(args.var_kd)
-            assert isinstance(var_kd, list)
-            l = len(var_kd)
-            self.epoch_to_kd_weight = []
-            ep = args.max_epoch
-            per_epoch = ep // l +1
-            for i in range(ep):
-                self.epoch_to_kd_weight.append(var_kd[i // per_epoch])
-    def post_task(self):
-        if ewc:
-            _ewc = EWC(self.curr_train_data[self.curr_task_name], to_data_loader=partial(self.process_data, mode="eval"))
-            _ewc.set_model(self.last_model[self.curr_task_name], self.task_var[self.curr_task_name])
-            _ewc.eval_fisher()
-            self.ewcs[self.curr_order] = _ewc
-        
-        torch.save(self.prev_models[self.curr_task_name][self.curr_order].state_dict(), "{}_{}_{}.pth".format(full_name,seed,self.curr_order))
-
-    def calculate_loss(self, oinputs, otargets, elemorder, model, compare_pairs, prev_models, metric, epoch):
-        outputs_full = model(oinputs, full=True)
-        outputs = model.process_output(outputs_full)
-        targets = model.process_labels(otargets)
-
-        
-        loss_penalty = 0
-        sample_weight = T.ones_like(targets)
-        if len(compare_pairs) > 0:
-
-            if (lwf or DIST_WEIGHT) and len(prev_models)>0:
-                ### We use test mode to calculate for knowlege distillation loss
-                with PytorchModeWrap(model, False):
-                    outputs = model.process_output(outputs_full)
-                    targets = model.process_labels(otargets)                  
-                    for k in compare_pairs:
-                        if args.kd_model != "":
-                            kd_model = external_model
-                        else:
-                            kd_model = prev_models[k]
-                        if USE_ENSEMBLE:
-                            submodels = kd_model.estimators_
-                        else:
-                            submodels = [kd_model]
-                        for kd_model in submodels:
-                            prev_full = kd_model(oinputs, full=True)
-                            prev_output = kd_model.process_output(prev_full)
-                            #bug? use full instead of processing output for metric
-                            if lwf:
-                                if args.correct_set:
-                                    mask = metric(prev_output, {"x":None,"y":otargets},kd_model)
-                                else:
-                                    mask = None
-                                if args.unsup_kd:
-                                    x_unsup, _ = next(self.dl_unsup)
-                                    x_kd = x_unsup.to(device)
-                                    kd_output = model(x_kd, full=True)
-                                    kd_prev_output = kd_model(x_kd, full=True)
-                                else:
-                                    kd_output = outputs_full
-                                    kd_prev_output = prev_full
-                                if args.seploss:
-                                    mask_prev = metric(prev_output, {"x":None,"y":otargets},kd_model)
-                                    mask_now = metric(outputs, {"x":None,"y":otargets},model)
-                                    mask = mask_prev * (1-mask_now)  # previously correct / now incorrect ones
-                                    sample_weight = (1- mask) 
-                                    sample_weight = sample_weight * sample_weight.size(0) / (T.sum(sample_weight) + 1e-2)
-                                klg_loss = knowledge_distill_loss(kd_output, kd_prev_output, prev_models[k], mask=mask)
-                                if VAR_KD:
-                                    klg_loss *= self.epoch_to_kd_weight[epoch]
-                                loss_penalty += klg_loss / len(submodels)
-                            if DIST_WEIGHT:
-                                _dist = T.sqrt(T.sum(T.square(prev_output - outputs), dim=1))
-                                if DIST_WEIGHT_INV:
-                                    _dist = 1.0 / ( _dist + 1e-2)
-                                if DIST_WEIGHT_NORMALIZE:
-                                    avg = T.mean(_dist)  
-                                    _dist = _dist / avg
-                                if DIST_WEIGHT_CAP:
-                                    _dist = T.minimum(T.ones_like(_dist), _dist)
-                                sample_weight = _dist.detach()
-
-            if ewc and len(prev_models)>0:
-                for k in compare_pairs:
-                    loss_penalty += self.ewcs[k].penalty(model)#.module)
-            loss_penalty /= len(compare_pairs)
-        if MIX_LABEL and len(compare_pairs) > 0:
-            if args.mix_label == "avg":
-                with PytorchModeWrap(model, False):   
-                    one_hot_prob = T.eye(get_config("CLASS_NUM"))[targets].to(device)               
-                    for k in compare_pairs:
-                        prev_full = prev_models[k](oinputs, full=True)
-                        prev_output = prev_models[k].process_output(prev_full)
-                        one_hot_prob += F.softmax(prev_output,dim=1)
-                    one_hot_prob /= len(compare_pairs)+ 1
-                    one_hot_prob = one_hot_prob.detach()
-            
-                loss = categorical_cross_entropy(F.softmax(outputs, dim=1),one_hot_prob)
-            elif args.mix_label == "adpt_avg":
-                one_hot_prob = T.eye(get_config("CLASS_NUM"))[targets].to(device)               
-
-                one_hot_prob += F.softmax(outputs,dim=1)
-                one_hot_prob /= 2
-                one_hot_prob = one_hot_prob.detach()
-                loss = categorical_cross_entropy(F.softmax(outputs, dim=1),one_hot_prob)
-            else:
-                assert False
-        else:
-            loss = criterion(outputs, targets)
-        if WARMUP and len(compare_pairs) > 0:
-            w = T.ones_like(targets).float()
-            warmup_sample_weight = T.where(elemorder.eq(self.curr_order_index).to(device), w / args.warmup_ep * (epoch+1),  w )
-            warmup_sample_weight = T.clamp(warmup_sample_weight,0.0, 1.0)
-            sample_weight = warmup_sample_weight
-        loss = T.mean(loss * sample_weight)
-        loss += loss_penalty
-        return loss, loss_penalty, outputs, targets
-
     def _train_single(self, omodel, dataloader, prev_models, device, epoch):
         print('\nEpoch: %d' % epoch)
         model = omodel#torch.nn.DataParallel(omodel)
-        model.train()
+        model.eval()
         #model.module = omodel
         train_loss = 0
         correct = 0
         total = 0
         compare_pairs = [] 
-                    
+            
+        model.load_state_dict(torch.load(args.model_path))
         for compare_pair in self.taskdata.comparison:   
            if compare_pair[-1] == self.curr_order:
                 compare_pairs.append(compare_pair[0])        
         print("current compare pairs", compare_pairs)   
         metric = self.taskdata.get_metric(self.curr_task_name)  
         val = self.curr_val_data_loader[self.curr_task_name]
-        if CON_IMPROVE:
-            ## Make it larger if neccessary
-            prev_corr = [None] * 100
-            prev_state = copy.deepcopy(model.state_dict())
-            prev_opt = copy.deepcopy(optimizer.state_dict())
-        if len(compare_pairs)>0:
-            prev_model = prev_models[compare_pairs[-1]]
-        def improve():
-            nonlocal model, val, prev_corr, prev_state, prev_opt
-            if CON_IMPROVE and len(compare_pairs)>0:
-                with torch.no_grad():
-                    _con_sum = 0
-                    _con_cnt = 0
-                    with PytorchModeWrap(model, False):
-                        f = True
-                        for idx, (x, y) in enumerate(val):
-                            #if idx>=5:
-                            #    break
-                            x, y = x.to(device), y.to(device)
-                            if prev_corr[idx] is None:
-                                output = prev_model(x)
-                                mask = metric(output, {"x":None,"y":y},prev_model)
-                                prev_corr[idx] = mask
-                                _con_sum += 1
-                                _con_cnt += 1
-                            else:
-                                output = model(x, full=True)
-                                output =prev_model.process_output(output)
-                                mask = metric(output, {"x":None,"y":y},model)                                
-                                _con_sum += torch.sum( mask * prev_corr[idx])
-                                #prev_corr[idx] = mask
-                                _con_cnt += torch.sum(prev_corr[idx])
-                        f = (_con_sum / _con_cnt) > 0.80
-                    if f:
-                        prev_state = copy.deepcopy(model.state_dict())
-                        prev_opt = copy.deepcopy(optimizer.state_dict())
-                        print("+",_con_sum / _con_cnt)
-                    else:
-                        print("-",_con_sum / _con_cnt)
-                        model.load_state_dict(prev_state)
-                        optimizer.load_state_dict(prev_opt)
+
         if USE_ENSEMBLE:
             val = self.curr_val_data_loader[self.curr_task_name]
             if args.ensemble == "snapshot":
                 epochs = args.max_epoch
-                
-                model.fit(
-                    dataloader,
-                    epochs=epochs,
-                    test_loader=val,
-                    loss_func = lambda x, y, elemorder, model,epoch: self.calculate_loss(x, y, elemorder, model, compare_pairs, prev_models, metric, epoch)
-                )
-                self.evaluator.add_addition("uncertainty", evaluate_uncertainty(model, val))
+                print("uncertainty", evaluate_uncertainty(model, val))
             elif args.ensemble == "bagging":
                 assert False
             else:
                 assert False
-        else:
-            for batch_idx, (oinputs, otargets, elemorder) in enumerate(dataloader):
-                #print(inputs.shape, targets.shape)
-                improve()
-                    #if batch_idx%10 == 0:
-                        #print(idx, prev_corr[0][:1])
-                        #print("mean", torch.mean(prev_corr[0].float()),torch.mean(mask) , f)
-                oinputs, otargets = oinputs.to(device), otargets.to(device)
-                if USE_ADV:
-                    #print(oinputs.size())
-                    oinputs = self.fgs.perturb(model, oinputs, model.process_labels(otargets),)
-                
-                optimizer.zero_grad()
-                loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, elemorder, model, compare_pairs, prev_models, metric, epoch)
-                loss.backward()
-                optimizer.step()
-
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-                
-                progress_bar(batch_idx, len(dataloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
-            improve()
-            self.scheduler.step()
-            print(len(prev_models), loss_penalty)
-
-
-    def _eval_single(self, model, dataloader, prev_models, device, epoch):
-        model.eval()
-        test_loss = 0
-        correct = 0
-        total = 0
-        print("eval")
-        compare_pairs = []         
-        for compare_pair in self.taskdata.comparison:   
-           if compare_pair[-1] == self.curr_order:
-                compare_pairs.append(compare_pair[0])        
-        print("current compare pairs", compare_pairs)   
-        metric = self.taskdata.get_metric(self.curr_task_name) 
-        with torch.no_grad():
-            for batch_idx, (oinputs, otargets) in enumerate(dataloader):
-                oinputs, otargets = oinputs.to(device), otargets.to(device)
-                
-                loss, loss_penalty, outputs, targets = self.calculate_loss(oinputs, otargets, model, compare_pairs, prev_models, metric)
-                _, predicted = outputs.max(1)
-                test_loss += loss.item()*targets.size(0)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-
-                #progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                #            % (test_loss/total, 100.*correct/total, correct, total))
-        print("eval loss", test_loss/total)
-        return test_loss/total
+        exit()
 
     def process_data(self, dataset, mode, batch_size=None, sampler=None, shuffle=None):
         if batch_size is None:
@@ -593,6 +356,7 @@ class ImageClassTraining(VT):
                 shuffle = False
         return torch.utils.data.DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle, num_workers=8, sampler=sampler, generator=torch.Generator().manual_seed(seed))
+
 
 ICD = setting["taskdata"]
 epsp = EPSP(device, max_step=  get_config("ic_parameter")["segments"])
@@ -643,8 +407,3 @@ train_cls = ImageClassTraining(max_epoch=args.max_epoch, granularity=granularity
 
 
 train_cls.controlled_train_single_task(net)
-os.makedirs(os.path.dirname(path), exist_ok=True)
-epsp.save(path)
-save_config(path)
-#test(epoch)
-
