@@ -25,7 +25,7 @@ args = []
 for ds in ["cifar10", "imagenet32"]:#,"imagenet32"]:
     for set in ["data_inc"]:  # ,"domain_inc"]:#"domain_inc", ]:
         for option1 in ["--lr=0.1 --opt=sgd --max-epoch=100 --segment=2"]:
-            for option2 in ["--model-update", "--occulusion"]:  # "--data-enlarge",
+            for option2 in ["--model-update", "--occulusion", "--data-enlarge"]:  #
                 for method in ["", "--lwf","--lwf --ensemble='snapshot'",  
                         "--lwf --ensemble='bagging'",
                         ]:#["--ensemble-num=5 --lwf --ensemble='bagging' ", "--ensemble='bagging' ","--lwf", ]:#["--ensemble='snapshot' ", "", "--lwf", "--lwf --ensemble='snapshot'",]:
@@ -53,3 +53,4 @@ for k in range(len(args)):
 p.close()
 p.join()
     
+#CUDA_VISIBLE_DEVICES = {GPUID} python ./main.py --model-update --class-seed=0  --lr=0.1 --opt=sgd --max-epoch=100 --segment=2 --dataset="cifar10" --inc-setting="data_inc"
