@@ -59,6 +59,7 @@ parser.add_argument("--ewc", action="store_true")
 parser.add_argument("--ewc-lambda", default=5000.0)
 parser.add_argument("--max-epoch", default=200,type=int)
 parser.add_argument("--dev-scene", default="sequential")
+parser.add_argument("--ensemble-num",default=5,type=int)
 parser.add_argument("--inc-setting", default="data_inc")
 parser.add_argument("--warmup-ep",default = 0, type=int)
 parser.add_argument("--class-seed", default=0)
@@ -227,7 +228,7 @@ def init_model():
     print('==> Building model..')
     # net = VGG('VGG19')
     torch.manual_seed(seed)
-    netdct = {"ResNet18":ResNet18, "ResNet34":ResNet34, "ResNet152":ResNet152,"LeNet":CLeNet}
+    netdct = {"ResNet18":ResNet18, "ResNet34":ResNet34, "ResNet152":ResNet152,"LeNet":CLeNet, "ResNet18v2":ResNet18}
     net =  netdct[args.net](procfunc=proc_func)
     os.makedirs("fix_init",exist_ok=True)
     cp_name = os.path.join("fix_init",ds_name + args.net+ str(seed))
@@ -308,12 +309,12 @@ class ImageClassTraining(VT):
 
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_epoch)
             if USE_ENSEMBLE:
-                model = SnapshotEnsembleClassifier(model, 5)
+                model = SnapshotEnsembleClassifier(model, args.ensemble_num)
                 lr = args.lr
                 weight_decay = 5e-4
                 momentum = 0.9
                 model.set_optimizer("SGD", lr=lr, weight_decay=weight_decay, momentum=momentum)
-                for i in range(5):
+                for i in range(args.ensemble_num):
                     model.estimators_.append(model._make_estimator())
         return model
     def _train_single(self, omodel, dataloader, prev_models, device, epoch):
@@ -333,14 +334,18 @@ class ImageClassTraining(VT):
         print("current compare pairs", compare_pairs)   
         metric = self.taskdata.get_metric(self.curr_task_name)  
         val = self.curr_val_data_loader[self.curr_task_name]
+        test = self.curr_test_data_loader[self.curr_task_name]
 
         if USE_ENSEMBLE:
             val = self.curr_val_data_loader[self.curr_task_name]
             if args.ensemble == "snapshot":
                 epochs = args.max_epoch
-                print("uncertainty", evaluate_uncertainty(model, val))
+                print("uncertainty on test", evaluate_uncertainty(model, test))
+                print("uncertainty on val", evaluate_uncertainty(model, val))
             elif args.ensemble == "bagging":
-                assert False
+                epochs = args.max_epoch
+                print("uncertainty", evaluate_uncertainty(model, test))
+                print("uncertainty on val", evaluate_uncertainty(model, val))
             else:
                 assert False
         exit()

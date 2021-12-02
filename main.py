@@ -14,6 +14,7 @@ import torchvision
 import torchvision.transforms as transforms
 
 import os
+import random
 import copy
 import argparse
 
@@ -29,7 +30,7 @@ from cl import EvalProgressPerSampleClassification as EPSP, \
 from cl.configs.imageclass_config import incremental_config
 from cl.utils import PytorchModeWrap, get_config, get_config_default, save_config, set_config, repeat_dataloader
 from cl.algo import knowledge_distill_loss, EWC
-from cl.algo.torchensemble import SnapshotEnsembleClassifier, evaluate_uncertainty, BaggingClassifier,  FastGeometricClassifier
+from cl.algo.torchensemble import SnapshotEnsembleClassifier, evaluate_uncertainty, evaluate_uncertainty_part, BaggingClassifier,  FastGeometricClassifier, evaluate_consistency
 from torch.utils.data import ConcatDataset
 from cl.dataset.imagenet32 import Imagenet32
 import cl
@@ -47,22 +48,27 @@ parser.add_argument("--ensemble", default="")
 parser.add_argument("--segment",default=2, type=int)
 parser.add_argument("--hist-avg",action="store_true")
 parser.add_argument("--trainaug",default="CF")
+parser.add_argument("--occulusion", action="store_true")
+parser.add_argument("--data-enlarge", action="store_true")
 parser.add_argument("--dist-weight",default="")
 parser.add_argument("--unsup-kd",action="store_true")
 parser.add_argument("--consistent-improve", action="store_true")
-parser.add_argument("--net", default="ResNet18")
+parser.add_argument("--net", default="ResNet18v2")
 parser.add_argument("--lwf", action="store_true")
 parser.add_argument("--loss",default="xent", choices=["l1","xent", "l1_xent"])
 parser.add_argument("--lwf-lambda", default=1.0, type=float)
 parser.add_argument("--scratch", action="store_true")
 parser.add_argument("--ewc", action="store_true")
 parser.add_argument("--ensemble-num",default=5,type=int)
+parser.add_argument("--ensemble-fast",action="store_true")
+parser.add_argument("--ensemble-best",action="store_true")
 parser.add_argument("--ewc-lambda", default=5000.0)
 parser.add_argument("--max-epoch", default=200,type=int)
 parser.add_argument("--dev-scene", default="sequential")
 parser.add_argument("--inc-setting", default="data_inc")
 parser.add_argument("--warmup-ep",default = 0, type=int)
 parser.add_argument("--class-seed", default=0)
+parser.add_argument("--model-update",action="store_true")
 parser.add_argument("--kd-model", default = "")
 parser.add_argument("--correct-set", action="store_true")
 parser.add_argument("--var-kd",default="[1]")
@@ -85,22 +91,37 @@ transform_test = transforms.Compose([
     transforms.ToTensor(),
 ])
 
-set_config("ic_parameter", {"segments": args.segment, "batch_size": 128})
+if args.data_enlarge:
+    assert args.segment ==2
+    order_prob = [0.1, 0.9]
+else:
+    order_prob = None
+set_config("ic_parameter", {"segments": args.segment,
+                            "batch_size": 128, "order_prob": order_prob})
+
 VAR_KD = args.var_kd != "[1]"
 USE_CF = args.trainaug .find("CF")>=0
 USE_ADV = args.trainaug .find("ADV")>=0
 USE_ENSEMBLE = args.ensemble != ""
 HIST_AVG = args.hist_avg
 DIST_WEIGHT = args.dist_weight != ""
+ENSEMBLE_FAST = args.ensemble_fast
+ENSEMBLE_BEST = args.ensemble_best
 assert args.ensemble in ["snapshot", "bagging", ""]
 assert args.dist_weight in ["I_normalized_l2", "I_normalized_l2_cap", "normalized_l2", ""]
 DIST_WEIGHT_INV = args.dist_weight.find("I_")>=0
+OCCULUTION = args.occulusion
 DIST_WEIGHT_NORMALIZE = args.dist_weight.find("normalized")>=0
 DIST_WEIGHT_CAP = args.dist_weight.find("cap")>=0
 CON_IMPROVE = args.consistent_improve
 MIX_LABEL = (args.mix_label != "")
-
+MODEL_UPDATE = (args.model_update)
+set_config("occulusion", OCCULUTION)
 WARMUP = (args.warmup_ep != 0)
+
+if MODEL_UPDATE:
+    args.scratch = True
+    args.net = "update"
 
 # for one hot encoding
 def categorical_cross_entropy(y_pred, y_true):
@@ -164,12 +185,17 @@ testloader = torch.utils.data.DataLoader(
 print(type(trainset),type(testset),type(trainset+testset))
 #torch.autograd.set_detect_anomaly(True)
 # configure the max step
+
 lwf = args.lwf
 ewc = args.ewc
 method_name = ""
 if USE_ENSEMBLE:
     method_name += "#ensemble_{}_{}".format(args.ensemble_num,args.ensemble)
     granularity = "epoch"
+    if ENSEMBLE_FAST:
+        method_name += "_EFast"
+    if ENSEMBLE_BEST:
+        method_name += "_EBest"
     is_copy = False
 else:
     granularity = "converge"
@@ -221,16 +247,22 @@ method_name += "_Opt{}".format(args.opt)
 set_config("develop_assumption", args.dev_scene)
 set_config("classification_task", args.inc_setting)
 setting = incremental_config(args.dataset)
-def init_model():
+def init_model(order):
     global net, criterion, optimizer, ds_name
     # Model
     print('==> Building model..')
     # net = VGG('VGG19')
     torch.manual_seed(seed)
-    netdct = {"ResNet18":ResNet18, "ResNet34":ResNet34, "ResNet152":ResNet152,"LeNet":CLeNet}
-    net =  netdct[args.net](procfunc=proc_func)
+    netdct = {"ResNet18":ResNet18, "ResNet34":ResNet34, "ResNet152":ResNet152,"LeNet":CLeNet, "ResNet18v2":ResNet18}
+    if MODEL_UPDATE:
+        touse_models = ["LeNet", "ResNet18v2"]
+        nname = touse_models[order]
+        net =  netdct[nname](procfunc=proc_func)
+    else:
+        nname = args.net
+        net =  netdct[args.net](procfunc=proc_func)
     os.makedirs("fix_init",exist_ok=True)
-    cp_name = os.path.join("fix_init",ds_name + args.net+ str(seed))
+    cp_name = os.path.join("fix_init",ds_name + nname + str(seed))
     if os.path.exists(cp_name):
         net.load_state_dict(torch.load(cp_name))
     else:
@@ -295,9 +327,16 @@ class ImageClassTraining(VT):
             global optimizer
             if get_config_default("reset_head_before_task", False):
                 model.reset_head()
-            if get_config("reset_net_before_task") or USE_ENSEMBLE:
-                init_model()
+            if get_config("reset_net_before_task")  or USE_ENSEMBLE:
+                init_model(self.curr_order_index)
+                if USE_ENSEMBLE and not MODEL_UPDATE:
+                    if ENSEMBLE_BEST and int(self.curr_order_index)>1:
+                        net.load_state_dict(model.state_dict())
+                    else:    
+                        if self.curr_order_index!=0:
+                            net.load_state_dict(model.estimators_[-1].state_dict())
                 model = net
+
             torch.manual_seed(seed)
             if args.opt == "sgd":
                 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum = 0.9, weight_decay=5e-4)
@@ -308,11 +347,23 @@ class ImageClassTraining(VT):
 
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_epoch)
             if USE_ENSEMBLE:
-                model = SnapshotEnsembleClassifier(model, args.ensemble_num)
+                if args.ensemble == "snapshot":
+                    model = SnapshotEnsembleClassifier(model, args.ensemble_num)
+                elif args.ensemble == "bagging":
+                    model = BaggingClassifier(model, args.ensemble_num)
+                else:
+                    assert False
                 lr = args.lr
                 weight_decay = 5e-4
                 momentum = 0.9
                 model.set_optimizer("SGD", lr=lr, weight_decay=weight_decay, momentum=momentum)
+                if args.ensemble == "snapshot":
+                    model.set_scheduler("CosineAnnealingLR", T_max=args.max_epoch/args.ensemble_num)
+                elif args.ensemble == "bagging":
+                    model.set_scheduler("CosineAnnealingLR", T_max=args.max_epoch)
+        if step == -1:
+            if ENSEMBLE_BEST and int(key)!=0:
+                model = model.best_model
         return model
 
     def process_model4eval(self, modeldct):
@@ -367,55 +418,60 @@ class ImageClassTraining(VT):
 
             if (lwf or DIST_WEIGHT) and len(prev_models)>0:
                 ### We use test mode to calculate for knowlege distillation loss
-                with PytorchModeWrap(model, False):
-                    outputs = model.process_output(outputs_full)
-                    targets = model.process_labels(otargets)                  
-                    for k in compare_pairs:
-                        if args.kd_model != "":
-                            kd_model = external_model
-                        else:
-                            kd_model = prev_models[k]
-                        if USE_ENSEMBLE:
-                            submodels = kd_model.estimators_
-                        else:
-                            submodels = [kd_model]
-                        for kd_model in submodels:
-                            prev_full = kd_model(oinputs, full=True)
-                            prev_output = kd_model.process_output(prev_full)
-                            #bug? use full instead of processing output for metric
-                            if lwf:
-                                if args.correct_set:
-                                    mask = metric(prev_output, {"x":None,"y":otargets},kd_model)
-                                else:
-                                    mask = None
-                                if args.unsup_kd:
-                                    x_unsup, _ = next(self.dl_unsup)
-                                    x_kd = x_unsup.to(device)
-                                    kd_output = model(x_kd, full=True)
-                                    kd_prev_output = kd_model(x_kd, full=True)
-                                else:
-                                    kd_output = outputs_full
-                                    kd_prev_output = prev_full
-                                if args.seploss:
-                                    mask_prev = metric(prev_output, {"x":None,"y":otargets},kd_model)
-                                    mask_now = metric(outputs, {"x":None,"y":otargets},model)
-                                    mask = mask_prev * (1-mask_now)  # previously correct / now incorrect ones
-                                    sample_weight = (1- mask) 
-                                    sample_weight = sample_weight * sample_weight.size(0) / (T.sum(sample_weight) + 1e-2)
-                                klg_loss = knowledge_distill_loss(kd_output, kd_prev_output, prev_models[k], mask=mask)
-                                if VAR_KD:
-                                    klg_loss *= self.epoch_to_kd_weight[epoch]
-                                loss_penalty += klg_loss / len(submodels)
-                            if DIST_WEIGHT:
-                                _dist = T.sqrt(T.sum(T.square(prev_output - outputs), dim=1))
-                                if DIST_WEIGHT_INV:
-                                    _dist = 1.0 / ( _dist + 1e-2)
-                                if DIST_WEIGHT_NORMALIZE:
-                                    avg = T.mean(_dist)  
-                                    _dist = _dist / avg
-                                if DIST_WEIGHT_CAP:
-                                    _dist = T.minimum(T.ones_like(_dist), _dist)
-                                sample_weight = _dist.detach()
+                #with PytorchModeWrap(model, False):
+                #    outputs = model.process_output(outputs_full)
+                #    targets = model.process_labels(otargets)                  
+                for k in compare_pairs:
+                    if args.kd_model != "":
+                        kd_model = external_model
+                    else:
+                        kd_model = prev_models[k]
+                    if USE_ENSEMBLE:
+                        submodels = kd_model.estimators_
+                        if ENSEMBLE_FAST:
+                            l = len(submodels)
+                            k1 = random.randrange(0,l)
+                            submodels = [submodels[k1]]
+                        
+                    else:
+                        submodels = [kd_model]
+                    for kd_model in submodels:
+                        prev_full = kd_model(oinputs, full=True)
+                        prev_output = kd_model.process_output(prev_full)
+                        #bug? use full instead of processing output for metric
+                        if lwf:
+                            if args.correct_set:
+                                mask = metric(prev_output, {"x":None,"y":otargets},kd_model)
+                            else:
+                                mask = None
+                            if args.unsup_kd:
+                                x_unsup, _ = next(self.dl_unsup)
+                                x_kd = x_unsup.to(device)
+                                kd_output = model(x_kd, full=True)
+                                kd_prev_output = kd_model(x_kd, full=True)
+                            else:
+                                kd_output = outputs_full
+                                kd_prev_output = prev_full
+                            if args.seploss:
+                                mask_prev = metric(prev_output, {"x":None,"y":otargets},kd_model)
+                                mask_now = metric(outputs, {"x":None,"y":otargets},model)
+                                mask = mask_prev * (1-mask_now)  # previously correct / now incorrect ones
+                                sample_weight = (1- mask) 
+                                sample_weight = sample_weight * sample_weight.size(0) / (T.sum(sample_weight) + 1e-2)
+                            klg_loss = knowledge_distill_loss(kd_output, kd_prev_output, prev_models[k], mask=mask)
+                            if VAR_KD:
+                                klg_loss *= self.epoch_to_kd_weight[epoch]
+                            loss_penalty += klg_loss / len(submodels)
+                        if DIST_WEIGHT:
+                            _dist = T.sqrt(T.sum(T.square(prev_output - outputs), dim=1))
+                            if DIST_WEIGHT_INV:
+                                _dist = 1.0 / ( _dist + 1e-2)
+                            if DIST_WEIGHT_NORMALIZE:
+                                avg = T.mean(_dist)  
+                                _dist = _dist / avg
+                            if DIST_WEIGHT_CAP:
+                                _dist = T.minimum(T.ones_like(_dist), _dist)
+                            sample_weight = _dist.detach()
 
             if ewc and len(prev_models)>0:
                 for k in compare_pairs:
@@ -514,18 +570,41 @@ class ImageClassTraining(VT):
             val = self.curr_val_data_loader[self.curr_task_name]
             if args.ensemble == "snapshot":
                 epochs = args.max_epoch
-                
+                assert isinstance(model, SnapshotEnsembleClassifier)
                 model.fit(
                     dataloader,
                     epochs=epochs,
                     test_loader=val,
                     loss_func = lambda x, y, elemorder, model,epoch: self.calculate_loss(x, y, elemorder, model, compare_pairs, prev_models, metric, epoch)
                 )
-                self.evaluator.add_addition("uncertainty", evaluate_uncertainty(model, val))
             elif args.ensemble == "bagging":
-                assert False
+                epochs = args.max_epoch
+                model.fit(
+                    dataloader,
+                    epochs=epochs,
+                    test_loader=val,
+                    loss_func = lambda x, y, elemorder, model,epoch: self.calculate_loss(x, y, elemorder, model, compare_pairs, prev_models, metric, epoch)
+                )
             else:
                 assert False
+            self.evaluator.add_addition("uncertainty", evaluate_uncertainty(model, val).item())
+            if len(compare_pairs)>0:
+                for learnexpt in [True,False]:
+                    for dataexpt in [True,False]:
+                        self.evaluator.add_addition(f"uncertainty_{learnexpt}_{dataexpt}_{self.curr_order_index}", evaluate_uncertainty_part(prev_model ,model, dataexpt, learnexpt,  \
+                            self.curr_train_data_loader[self.curr_task_name], val, self.curr_test_data_loader[self.curr_task_name]).item())
+            if ENSEMBLE_BEST and len(compare_pairs)>0:
+                best = -1
+                best_model = None
+                cs = []
+                for cmodel in model.estimators_:
+                    c = evaluate_consistency(prev_model, cmodel, val)
+                    cs.append(c)
+                    if c>best:
+                        best = c
+                        best_model = cmodel
+                print(cs)
+                model.best_model = best_model
         else:
             for batch_idx, (oinputs, otargets, elemorder) in enumerate(dataloader):
                 #print(inputs.shape, targets.shape)
@@ -608,7 +687,7 @@ path = os.path.join("./cl/results/", full_name, "Seed{}".format(seed))
 if args.skip_exist:
     if  os.path.exists(path + "_config.json"):
         exit()
-init_model()
+init_model(0)
 # Get corresponding task data class based on different setting
 
 #epsp.add_data(name="test",data=fd_test)
@@ -618,7 +697,7 @@ print(cl.utils.config)
 ds = ConcatDataset([trainset,testset])
 if args.smalldata:
     if args.dataset in ["cifar10", "cifar100"]:
-        ds, ds_remained = torch.utils.data.random_split(ds, [30000, 30000], generator=torch.Generator().manual_seed(seed))
+        ds, ds_remained = torch.utils.data.random_split(ds, [10000, 50000], generator=torch.Generator().manual_seed(seed))
     else:
         ds, ds_remained, _ = torch.utils.data.random_split(ds, [200000, 200000, len(ds)- 400000], generator=torch.Generator().manual_seed(seed))
 
