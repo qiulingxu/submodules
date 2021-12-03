@@ -73,7 +73,7 @@ class Bottleneck(nn.Module):
 
 
 
-class ResNetv1(nn.Module):
+class ResNet(nn.Module):
     def __init__(self, block, num_blocks, num_classes=10, procfunc = None):
         super(ResNet, self).__init__()
         self.in_planes = 64
@@ -109,7 +109,7 @@ class ResNetv1(nn.Module):
         out = self.linear(out)
         return out
 
-class ResNet(nn.Module):
+class ResNetv1(nn.Module):
     def __init__(self, block, num_blocks, num_classes=10, procfunc = None):
         super(ResNet, self).__init__()
         self.in_planes = 16

@@ -5,14 +5,14 @@ from cl import ClassificationMask as CM
 from cl.utils import get_config
 
 class LeNet(nn.Module):
-    def __init__(self, procfunc = None):
+    def __init__(self, procfunc=None, num_classes=10):
         super(LeNet, self).__init__()
         self.procfunc = procfunc
         self.conv1 = nn.Conv2d(3, 6, 5)
         self.conv2 = nn.Conv2d(6, 16, 5)
         self.fc1   = nn.Linear(16*5*5, 120)
         self.fc2   = nn.Linear(120, 84)
-        self.fc3   = nn.Linear(84, 10)
+        self.fc3 = nn.Linear(84, num_classes)
 
     def forward(self, x):
         if self.procfunc is not None:
@@ -26,5 +26,11 @@ class LeNet(nn.Module):
         out = F.relu(self.fc2(out))
         out = self.fc3(out)
         return out
-CLeNet = CM(LeNet)
+
+
+CMLeNet = CM(LeNet)
+
+def CLeNet(**karg):
+    print(get_config("CLASS_NUM"))
+    return CMLeNet(num_classes=get_config("CLASS_NUM"))
 
