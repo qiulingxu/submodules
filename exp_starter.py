@@ -27,21 +27,21 @@ for ds in [ "imagenet32"]:#,"imagenet32"]:
         for option1 in ["--lr=0.1 --opt=sgd --max-epoch=100 --segment=2"]:
             for option2 in ["--model-update", "--occulusion", "--data-enlarge"]:  #
                 for method in ["", "--lwf","--lwf --ensemble='snapshot'",  
-                        "--lwf --ensemble='bagging'",
+                        "--lwf --ensemble='bagging'", " --ensemble='snapshot'", " --ensemble='bagging'",
                         ]:#["--ensemble-num=5 --lwf --ensemble='bagging' ", "--ensemble='bagging' ","--lwf", ]:#["--ensemble='snapshot' ", "", "--lwf", "--lwf --ensemble='snapshot'",]:
                     args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
                                 format(ds, set, method, option1, option2))
 
-"""args = []
-for ds in ["cifar100"]:#,"imagenet32"]:
-    for set in ["data_inc"]:  # ,"domain_inc"]:#"domain_inc", ]:
-        for option1 in ["--lr=0.1 --opt=sgd --occulusion --small --max-epoch=100"]:
-            for method in ["--improve-loss --improve-loss-beta=1.0", "--improve-loss --improve-loss-beta=0.8"
-                     ]:#["--ensemble-num=5 --lwf --ensemble='bagging' ", "--ensemble='bagging' ","--lwf", ]:#["--ensemble='snapshot' ", "", "--lwf", "--lwf --ensemble='snapshot'",]:
-                for option2 in ["--segment=2", ]:
-                    args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
-                                format(ds, set, method, option1, option2))
-"""
+#args = []
+#for ds in ["cifar100"]:#,"imagenet32"]:
+#    for set in ["data_inc"]:  # ,"domain_inc"]:#"domain_inc", ]:
+#        for option1 in ["--lr=0.1 --opt=sgd --occulusion --small --max-epoch=100"]:
+#            for method in ["--improve-loss --improve-loss-beta=1.0", "--improve-loss --improve-loss-beta=0.8"
+#                     ]:#["--ensemble-num=5 --lwf --ensemble='bagging' ", "--ensemble='bagging' ","--lwf", ]:#["--ensemble='snapshot' ", "", "--lwf", "--lwf --ensemble='snapshot'",]:
+#                for option2 in ["--segment=2", ]:
+#                    args.append(""" --dataset="{}" --inc-setting="{}" {}  {} {} """.
+#                                format(ds, set, method, option1, option2))
+
 # python eval_model.py --lr=0.1 --ensemble='snapshot' --opt=sgd --small --dataset="cifar10" --inc-setting="data_inc"  --model-path = "cifar10_small#Aug_CF_ResNet18_1.0e-01_#ensemble_5_snapshot_Optsgd_DScifar10_CIMmask_CTdata_inc_DAsequential_CvgS40_DomS2_Ep200_FixInit_0_0.pth"                  
 Num = 8
 results = []
