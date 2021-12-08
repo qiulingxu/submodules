@@ -51,6 +51,8 @@ parser.add_argument("--trainaug",default="CF")
 parser.add_argument("--occulusion", action="store_true")
 parser.add_argument("--data-enlarge", action="store_true")
 parser.add_argument("--dist-weight",default="")
+parser.add_argument("--improve-loss",action="store_true")
+parser.add_argument("--improve-loss-beta",default=0.5,type=float)
 parser.add_argument("--unsup-kd",action="store_true")
 parser.add_argument("--consistent-improve", action="store_true")
 parser.add_argument("--net", default="ResNet18v2")
@@ -126,7 +128,7 @@ if MODEL_UPDATE:
 # for one hot encoding
 def categorical_cross_entropy(y_pred, y_true):
     y_pred = torch.clamp(y_pred, 1e-9, 1 - 1e-9)
-    return -(y_true * torch.log(y_pred)).sum(dim=1)
+    return T.mean(-(y_true * torch.log(y_pred)).sum(dim=1))
 
 assert not args.unsup_kd or not args.correct_set
 # Crop Flip
@@ -239,6 +241,9 @@ if CON_IMPROVE:
 
 if args.kd_model != "":
     method_name += "#ext_kd_model"
+
+if args.improve_loss:
+    method_name += "#IMP_LOSSv4_Beta_{:.2}".format(args.improve_loss_beta)
 
 if method_name == "":
     method_name = "#vanilla"
@@ -406,6 +411,12 @@ class ImageClassTraining(VT):
         
         torch.save(self.prev_models[self.curr_task_name][self.curr_order].state_dict(), "{}_{}_{}.pth".format(full_name,seed,self.curr_order))
 
+    def cond_prob_guess(self, prev_prob, curr_prob, beta):
+        max_prob = T.minimum(prev_prob,curr_prob)
+        min_prob = prev_prob * curr_prob
+        cond_prob_unnorm = (min_prob  * (1-beta) + max_prob * beta)/ (prev_prob+ 1e-5)        
+        return cond_prob_unnorm
+
     def calculate_loss(self, oinputs, otargets, elemorder, model, compare_pairs, prev_models, metric, epoch):
         outputs_full = model(oinputs, full=True)
         outputs = model.process_output(outputs_full)
@@ -436,8 +447,9 @@ class ImageClassTraining(VT):
                     else:
                         submodels = [kd_model]
                     for kd_model in submodels:
-                        prev_full = kd_model(oinputs, full=True)
-                        prev_output = kd_model.process_output(prev_full)
+                        with T.no_grad():
+                            prev_full = kd_model(oinputs, full=True)
+                            prev_output = kd_model.process_output(prev_full)
                         #bug? use full instead of processing output for metric
                         if lwf:
                             if args.correct_set:
@@ -462,6 +474,34 @@ class ImageClassTraining(VT):
                             if VAR_KD:
                                 klg_loss *= self.epoch_to_kd_weight[epoch]
                             loss_penalty += klg_loss / len(submodels)
+                        if args.improve_loss:
+                            Temp = 2.0
+                            prev_prob = F.softmax(prev_output / Temp, dim=1)
+                            curr_prob = F.softmax(outputs / Temp, dim=1)
+                            """#version 2
+                            max_prob = T.minimum(prev_prob,curr_prob)
+                            min_prob = prev_prob * curr_prob
+                            cond_prob_unnorm = (min_prob  * (1-args.improve_loss_beta) + max_prob * (args.improve_loss_beta))/ (prev_prob+ 1e-5)
+                            cond_prob = cond_prob_unnorm #/ T.sum(cond_prob, dim=1,keepdim=True)
+                            one_hot_prob = T.eye(get_config("CLASS_NUM"))[targets].to(device)
+                            loss_penalty += categorical_cross_entropy(cond_prob,one_hot_prob)
+                            """
+                            """
+                            #version 3
+                            cond_prob_label = self.cond_prob_guess(prev_prob, curr_prob, args.improve_loss_beta)
+                            #cond_prob_unlabel = 1.0 - self.cond_prob_guess(prev_prob, curr_prob, args.improve_loss_beta)
+                            cond_prob_unlabel = self.cond_prob_guess(1.0 - prev_prob, 1.0 - curr_prob, args.improve_loss_beta)
+                            one_hot_prob = T.eye(get_config("CLASS_NUM"))[targets].to(device)
+                            final_cond = cond_prob_label * one_hot_prob + cond_prob_unlabel * (1.0-one_hot_prob)
+                            loss_penalty += categorical_cross_entropy(final_cond,prev_prob)  
+                            """
+                            #Version 4
+                            one_hot_prob = T.eye(get_config("CLASS_NUM"))[targets].to(device)
+                            l_cond = T.less_equal(prev_prob,curr_prob).float()
+                            g_cond = T.greater_equal(prev_prob,curr_prob).float()
+                            mask = (1-one_hot_prob) * l_cond + one_hot_prob * g_cond
+                            loss_penalty += categorical_cross_entropy(curr_prob,mask*prev_prob)  
+                            
                         if DIST_WEIGHT:
                             _dist = T.sqrt(T.sum(T.square(prev_output - outputs), dim=1))
                             if DIST_WEIGHT_INV:
@@ -592,7 +632,7 @@ class ImageClassTraining(VT):
                 for learnexpt in [True,False]:
                     for dataexpt in [True,False]:
                         self.evaluator.add_addition(f"uncertainty_{learnexpt}_{dataexpt}_{self.curr_order_index}", evaluate_uncertainty_part(prev_model ,model, dataexpt, learnexpt,  \
-                            self.curr_train_data_loader[self.curr_task_name], val, self.curr_test_data_loader[self.curr_task_name]).item())
+                            self.prev_train_data_loader[self.curr_task_name], val, self.prev_test_data_loader[self.curr_task_name]).item())
             if ENSEMBLE_BEST and len(compare_pairs)>0:
                 best = -1
                 best_model = None
